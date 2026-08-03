@@ -213,10 +213,26 @@ export function Layout({ children }: { children: React.ReactNode }) {
         {children}
       </main>
 
-      {/* 番茄钟浮标：非沉浸页面时挂右上角（沉浸页面自己在工具栏里放） */}
+      {/* 右上角：使用说明 + 番茄钟。
+          沉浸页面（讲解页/文档页）不挂，那里工具栏自己有位置。 */}
       {!immersive && (
-        <div className="fixed top-3 right-4 z-40">
+        <div className="fixed top-3 right-4 z-40 flex items-center gap-2">
           <PomodoroPill />
+          <NavLink
+            to="/guide"
+            className={cn(
+              'flex items-center gap-1.5 h-7 px-2.5 rounded-full',
+              'border border-[var(--border)] bg-[var(--bg-raised)]/85 backdrop-blur-sm',
+              'text-[12px] text-[var(--text-muted)]',
+              'hover:text-[var(--text)] hover:border-[var(--border-strong)] transition-colors',
+            )}
+          >
+            <svg viewBox="0 0 24 24" className="size-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9.5" />
+              <path d="M9.2 9.1a3 3 0 1 1 4.2 2.8c-.8.4-1.3 1.1-1.3 2v.3M12 17.4h.01" />
+            </svg>
+            使用说明
+          </NavLink>
         </div>
       )}
 

@@ -169,6 +169,17 @@ export default function DocReaderPage() {
           {translatedCount}/{doc.stats.blocks} 段
         </span>
 
+        <button
+          onClick={() => window.open('/guide', '_blank')}
+          title="使用说明"
+          className="size-6 flex items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-subtle)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)] transition-colors"
+        >
+          <svg viewBox="0 0 24 24" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="9.5" />
+            <path d="M9.2 9.1a3 3 0 1 1 4.2 2.8c-.8.4-1.3 1.1-1.3 2v.3M12 17.4h.01" />
+          </svg>
+        </button>
+
         {translating ? (
           <Button size="xs" variant="outline" onClick={() => abortRef.current?.abort()}>
             停止（{progress.done}/{progress.total}）

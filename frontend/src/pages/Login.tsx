@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { Link, useLocation, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth } from '@/lib/store'
@@ -215,9 +215,21 @@ export default function LoginPage() {
             </p>
           )}
 
-          <p className="mt-8 text-[11px] leading-relaxed text-[var(--text-subtle)] text-center">
-            登录态存放在 httpOnly cookie 中，JavaScript 读取不到。
-          </p>
+          <div className="mt-8 text-center">
+            <Link
+              to="/guide"
+              className="inline-flex items-center gap-1.5 text-[12.5px] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+            >
+              <svg viewBox="0 0 24 24" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="9.5" />
+                <path d="M9.2 9.1a3 3 0 1 1 4.2 2.8c-.8.4-1.3 1.1-1.3 2v.3M12 17.4h.01" />
+              </svg>
+              先看看怎么用
+            </Link>
+            <p className="mt-4 text-[11px] leading-relaxed text-[var(--text-subtle)]">
+              登录态存放在 httpOnly cookie 中，JavaScript 读取不到。
+            </p>
+          </div>
         </form>
       </div>
     </div>

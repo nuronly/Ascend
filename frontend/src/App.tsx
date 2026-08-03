@@ -8,6 +8,7 @@ import { useAuth, usePomodoro } from './lib/store'
 import { Spinner } from './components/ui'
 
 import LoginPage from './pages/Login'
+import GuidePage from './pages/Guide'
 import HomePage from './pages/Home'
 import CoursePage from './pages/Course'
 import SectionPage from './pages/Section'
@@ -104,6 +105,8 @@ export default function App() {
           <Toaster />
           <Routes>
             <Route path="/login" element={<LoginPage />} />
+            {/* 使用说明放在 Guard 之外：没登录也该能看懂这产品是干嘛的 */}
+            <Route path="/guide" element={<GuidePage />} />
             <Route
               path="/*"
               element={

@@ -274,6 +274,18 @@ export default function SectionPage() {
           </div>
         )}
 
+        <Tip label="使用说明">
+          <button
+            onClick={() => window.open('/guide', '_blank')}
+            className="size-6 flex items-center justify-center rounded-[var(--radius-sm)] text-[var(--text-subtle)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)] transition-colors"
+          >
+            <svg viewBox="0 0 24 24" className="size-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <circle cx="12" cy="12" r="9.5" />
+              <path d="M9.2 9.1a3 3 0 1 1 4.2 2.8c-.8.4-1.3 1.1-1.3 2v.3M12 17.4h.01" />
+            </svg>
+          </button>
+        </Tip>
+
         {!pomodoro && (
           <Tip label={`起一颗 ${section.est_minutes} 分钟的番茄`}>
             <Button size="xs" variant="ghost" onClick={() => startPomodoro(sectionId, section.est_minutes)}>
