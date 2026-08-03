@@ -11,10 +11,13 @@ import LoginPage from './pages/Login'
 import HomePage from './pages/Home'
 import CoursePage from './pages/Course'
 import SectionPage from './pages/Section'
+import DocumentsPage from './pages/Documents'
+import DocReaderPage from './pages/DocReader'
 import VaultPage from './pages/Vault'
 import GraphPage from './pages/Graph'
 import BrainPage from './pages/Brain'
 import ReviewPage from './pages/Review'
+import BadgesPage from './pages/Badges'
 import SettingsPage from './pages/Settings'
 
 const queryClient = new QueryClient({
@@ -114,7 +117,10 @@ export default function App() {
                           path="/courses/:courseId/sections/:sectionId"
                           element={<SectionPage />}
                         />
+                        <Route path="/documents" element={<DocumentsPage />} />
+                        <Route path="/documents/:docId" element={<DocReaderPage />} />
                         <Route path="/vault" element={<VaultPage />} />
+                        <Route path="/badges" element={<BadgesPage />} />
                         <Route path="/graph" element={<GraphPage />} />
                         <Route path="/graph/:courseId" element={<GraphPage />} />
                         <Route path="/brain" element={<BrainPage />} />

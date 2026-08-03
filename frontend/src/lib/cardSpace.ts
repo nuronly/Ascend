@@ -22,10 +22,12 @@ export interface DraftAnchor {
   origin_message_id?: string | null
   origin_offset?: { start?: number; end?: number }
   source_section_id?: string | null
+  source_doc_block_id?: string | null
 }
 
 interface CardSpaceState {
   sectionId: string | null
+  docId: string | null
   cards: Card[]
   links: CardLink[]
   /** 正在流式生成的回答：cardId → 已收到的文本 */
@@ -38,6 +40,7 @@ interface CardSpaceState {
   abort: Record<string, AbortController>
 
   load: (sectionId: string) => Promise<void>
+  loadDoc: (docId: string) => Promise<void>
   reset: () => void
 
   createAndAsk: (anchor: DraftAnchor, question: string) => Promise<string | null>
@@ -73,6 +76,7 @@ const flushNote = debounce((cardId: string, note: string) => {
 
 export const useCardSpace = create<CardSpaceState>((set, get) => ({
   sectionId: null,
+  docId: null,
   cards: [],
   links: [],
   streaming: {},
@@ -86,13 +90,34 @@ export const useCardSpace = create<CardSpaceState>((set, get) => ({
     const data = await api.get<{ cards: Card[]; links: CardLink[] }>(
       `/cards?section_id=${sectionId}`,
     )
-    set({ sectionId, cards: data.cards, links: data.links, streaming: {}, busy: new Set() })
+    set({
+      sectionId,
+      docId: null,
+      cards: data.cards,
+      links: data.links,
+      streaming: {},
+      busy: new Set(),
+    })
+  },
+
+  /** 文档模式：整篇文档下的卡片（PLAN §3.5，复用同一套卡片空间） */
+  loadDoc: async (docId) => {
+    const data = await api.get<{ cards: Card[]; links: CardLink[] }>(`/cards?doc_id=${docId}`)
+    set({
+      docId,
+      sectionId: null,
+      cards: data.cards,
+      links: data.links,
+      streaming: {},
+      busy: new Set(),
+    })
   },
 
   reset: () => {
     Object.values(get().abort).forEach((a) => a.abort())
     set({
       sectionId: null,
+      docId: null,
       cards: [],
       links: [],
       streaming: {},
@@ -107,12 +132,14 @@ export const useCardSpace = create<CardSpaceState>((set, get) => ({
   /** 划词 → 建卡 → 立刻开始流式回答，一气呵成。 */
   createAndAsk: async (anchor, question) => {
     try {
+      const docId = get().docId
       const card = await api.post<Card>('/cards', {
         selected_text: anchor.selected_text,
         context_text: anchor.context_text,
         question,
-        source_type: 'course',
+        source_type: anchor.source_doc_block_id || docId ? 'doc' : 'course',
         source_section_id: anchor.source_section_id ?? get().sectionId,
+        source_doc_block_id: anchor.source_doc_block_id ?? null,
         text_anchor: anchor.text_anchor,
         parent_card_id: anchor.parent_card_id ?? null,
         origin: anchor.origin,

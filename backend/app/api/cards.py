@@ -179,6 +179,16 @@ async def list_cards(
     if section_id:
         await scope.require_section(section_id)
         stmt = stmt.where(Card.source_section_id == section_id)
+    if doc_id:
+        # 文档模式：整篇文档下的所有卡片（PLAN §3.5）
+        from app.models.document import DocBlock, Document
+
+        await scope.require(Document, doc_id, "文档")
+        stmt = stmt.where(
+            Card.source_doc_block_id.in_(
+                select(DocBlock.id).where(DocBlock.doc_id == doc_id)
+            )
+        )
     if pomodoro_id:
         stmt = stmt.where(Card.pomodoro_id == pomodoro_id)
     if state:

@@ -111,17 +111,31 @@ async def health() -> dict:
 
 
 # ── 路由注册 ──
-from app.api import auth, brain, cards, courses, export, graph, pomodoro, review, vault  # noqa: E402
+from app.api import (  # noqa: E402
+    auth,
+    badges,
+    brain,
+    cards,
+    courses,
+    documents,
+    export,
+    graph,
+    pomodoro,
+    review,
+    vault,
+)
 
 for r in (
     auth.router,
     courses.router,
     cards.router,
+    documents.router,
     pomodoro.router,
     vault.router,
     graph.router,
     brain.router,
     review.router,
+    badges.router,
     export.router,
 ):
     app.include_router(r, prefix="/api")

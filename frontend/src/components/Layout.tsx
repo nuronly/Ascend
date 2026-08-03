@@ -18,6 +18,17 @@ const NAV = [
     ),
   },
   {
+    to: '/documents',
+    label: '文档',
+    icon: (
+      <>
+        <path d="M6 3h9l5 5v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Z" />
+        <path d="M15 3v5h5" />
+        <path d="M9 13h7M9 17h4" strokeLinecap="round" />
+      </>
+    ),
+  },
+  {
     to: '/vault',
     label: '仓库',
     icon: (
@@ -60,6 +71,16 @@ const NAV = [
       </>
     ),
     badgeKey: 'due' as const,
+  },
+  {
+    to: '/badges',
+    label: '勋章',
+    icon: (
+      <>
+        <circle cx="12" cy="9" r="5.5" />
+        <path d="m8.5 13.5-1.8 7 5.3-2.6 5.3 2.6-1.8-7" strokeLinejoin="round" />
+      </>
+    ),
   },
 ]
 
