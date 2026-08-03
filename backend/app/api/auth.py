@@ -6,7 +6,7 @@ from datetime import timedelta
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 
 from app.api.deps import ACCESS_COOKIE, REFRESH_COOKIE, CurrentUser, Db
 from app.core.config import settings
@@ -31,6 +31,7 @@ class RegisterIn(BaseModel):
     email: EmailStr
     name: str = Field(min_length=1, max_length=60)
     password: str = Field(min_length=8, max_length=128)
+    invite_code: str = Field(default="", max_length=100)
 
 
 class LoginIn(BaseModel):
@@ -106,8 +107,27 @@ async def _issue_refresh(db: Db, user_id: str, request: Request) -> str:
 # ─────────────────────────────────────────────────────────────
 # 端点
 # ─────────────────────────────────────────────────────────────
+@router.get("/config")
+async def auth_config() -> dict:
+    """给登录页用：是否开放注册、要不要邀请码。"""
+    return {
+        "allow_registration": settings.allow_registration,
+        "invite_required": bool(settings.invite_code),
+    }
+
+
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)
 async def register(body: RegisterIn, request: Request, response: Response, db: Db) -> UserOut:
+    # ★ 准入控制：多用户 + 云 API = 别人用你的 key 花你的钱（PLAN §4.2）
+    if not settings.allow_registration:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "本站暂未开放注册")
+    if settings.invite_code and body.invite_code.strip() != settings.invite_code:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "邀请码不正确")
+    if settings.max_users:
+        total = await db.scalar(select(func.count(User.id))) or 0
+        if total >= settings.max_users:
+            raise HTTPException(status.HTTP_403_FORBIDDEN, "名额已满")
+
     email = body.email.lower().strip()
     exists = await db.scalar(select(User.id).where(User.email == email))
     if exists:

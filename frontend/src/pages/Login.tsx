@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth } from '@/lib/store'
 import type { User } from '@/lib/types'
@@ -11,8 +12,19 @@ export default function LoginPage() {
   const [email, setEmail] = useState('')
   const [name, setName] = useState('')
   const [password, setPassword] = useState('')
+  const [invite, setInvite] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
+
+  // 站点是否开放注册 / 要不要邀请码（上线后通常会关掉自由注册）
+  const { data: cfg } = useQuery({
+    queryKey: ['auth-config'],
+    queryFn: () =>
+      api.get<{ allow_registration: boolean; invite_required: boolean }>('/auth/config'),
+    staleTime: Infinity,
+    retry: false,
+  })
+  const canRegister = cfg?.allow_registration !== false
 
   const { user, setUser } = useAuth()
   const nav = useNavigate()
@@ -28,7 +40,14 @@ export default function LoginPage() {
     setBusy(true)
     try {
       const body =
-        mode === 'login' ? { email, password } : { email, name: name.trim() || email.split('@')[0], password }
+        mode === 'login'
+          ? { email, password }
+          : {
+              email,
+              name: name.trim() || email.split('@')[0],
+              password,
+              invite_code: invite.trim(),
+            }
       const u = await api.post<User>(`/auth/${mode}`, body)
       setUser(u)
       nav(location.state?.from ?? '/', { replace: true })
@@ -141,6 +160,19 @@ export default function LoginPage() {
                 autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               />
             </div>
+            {mode === 'register' && cfg?.invite_required && (
+              <div>
+                <label className="block text-[12px] font-medium text-[var(--text-muted)] mb-1.5">
+                  邀请码
+                </label>
+                <Input
+                  required
+                  value={invite}
+                  onChange={(e) => setInvite(e.target.value)}
+                  placeholder="本站需要邀请码"
+                />
+              </div>
+            )}
           </div>
 
           {error && (
@@ -155,20 +187,33 @@ export default function LoginPage() {
             </div>
           )}
 
-          <Button type="submit" variant="primary" size="md" loading={busy} className="w-full mt-5">
+          <Button
+            type="submit"
+            variant="primary"
+            size="md"
+            loading={busy}
+            disabled={mode === 'register' && !canRegister}
+            className="w-full mt-5"
+          >
             {mode === 'login' ? '登录' : '注册'}
           </Button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setMode(mode === 'login' ? 'register' : 'login')
-              setError('')
-            }}
-            className="w-full mt-4 text-[12.5px] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
-          >
-            {mode === 'login' ? '还没有账号？注册一个' : '已经有账号了？去登录'}
-          </button>
+          {canRegister ? (
+            <button
+              type="button"
+              onClick={() => {
+                setMode(mode === 'login' ? 'register' : 'login')
+                setError('')
+              }}
+              className="w-full mt-4 text-[12.5px] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
+            >
+              {mode === 'login' ? '还没有账号？注册一个' : '已经有账号了？去登录'}
+            </button>
+          ) : (
+            <p className="w-full mt-4 text-[12.5px] text-[var(--text-subtle)] text-center">
+              本站暂未开放注册
+            </p>
+          )}
 
           <p className="mt-8 text-[11px] leading-relaxed text-[var(--text-subtle)] text-center">
             登录态存放在 httpOnly cookie 中，JavaScript 读取不到。

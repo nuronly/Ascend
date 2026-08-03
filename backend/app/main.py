@@ -37,6 +37,21 @@ async def lifespan(_: FastAPI):
         settings.model_small,
         settings.model_embedding,
     )
+
+    # 上线自检：把容易漏的坑摆到眼前，而不是等出事
+    if warnings := settings.production_warnings():
+        log.warning("─" * 62)
+        log.warning("生产环境自检发现 %s 个问题：", len(warnings))
+        for w in warnings:
+            log.warning("  ⚠️  %s", w)
+        log.warning("─" * 62)
+    elif settings.is_prod:
+        log.info("生产环境自检通过 ✓")
+
+    if settings.serve_frontend:
+        log.info(
+            "静态前端：%s", settings.dist_path or "未找到 dist，请先执行 npm run build"
+        )
     yield
     from app.llm.registry import close_all
 
@@ -61,6 +76,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 速率限制（生产开启）：认证端点防撞库，AI 端点防刷额度
+from app.core.ratelimit import rate_limit_middleware  # noqa: E402
+
+app.middleware("http")(rate_limit_middleware)
 
 
 # ── CSRF：SameSite 之外再加一道 Origin 校验 ──
@@ -139,3 +159,31 @@ for r in (
     export.router,
 ):
     app.include_router(r, prefix="/api")
+
+
+# ── 静态前端（单体部署）──
+# 路由注册必须在此之后：SPA 的 catch-all 会吞掉一切未匹配路径，
+# 放前面的话所有 API 都会被它接管。
+if settings.serve_frontend and (_dist := settings.dist_path):
+    from fastapi.responses import FileResponse  # noqa: E402
+    from fastapi.staticfiles import StaticFiles  # noqa: E402
+
+    app.mount("/assets", StaticFiles(directory=_dist / "assets"), name="assets")
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def spa(full_path: str):
+        """SPA fallback：前端是 BrowserRouter，刷新任意深层路由都要回到 index.html。"""
+        if full_path.startswith("api/"):
+            return JSONResponse({"detail": "Not Found"}, status_code=404)
+        candidate = (_dist / full_path).resolve()
+        # 目录穿越防护
+        if (
+            full_path
+            and str(candidate).startswith(str(_dist.resolve()))
+            and candidate.is_file()
+        ):
+            return FileResponse(candidate)
+        return FileResponse(
+            _dist / "index.html",
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )

@@ -1,0 +1,80 @@
+# ─────────────────────────────────────────────────────────────
+#  阶梯 · 生产编排
+#
+#  Caddy 负责 HTTPS（自动申请并续期 Let's Encrypt 证书）
+#  app   负责 API + 静态前端
+#
+#  启动：
+#    cp .env.prod.example .env.prod   # 填好再启
+#    docker compose up -d --build
+# ─────────────────────────────────────────────────────────────
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env.prod
+    environment:
+      APP_ENV: prod
+      SERVE_FRONTEND: "true"
+      FRONTEND_DIST: /app/web
+      COOKIE_SECURE: "true"
+      RATE_LIMIT_ENABLED: "true"
+      DATABASE_URL: sqlite+aiosqlite:////app/data/ladder.db
+    volumes:
+      # 数据库与勋章图片必须持久化，否则重建容器就全没了
+      - ladder-data:/app/data
+    expose:
+      - "8788"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8788/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # 在 .env.prod 里设 DOMAIN=learn.example.com
+      DOMAIN: ${DOMAIN:?请在 .env.prod 中设置 DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_healthy
+
+  # ── 可选：切到 PostgreSQL ──
+  # 需要多 worker 或数据量上来时启用：
+  #   docker compose --profile pg up -d
+  # 然后把 .env.prod 的 DATABASE_URL 改成：
+  #   postgresql+asyncpg://ladder:<密码>@db:5432/ladder
+  db:
+    image: pgvector/pgvector:pg16
+    profiles: ["pg"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ladder
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ladder
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ladder"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  ladder-data:
+  caddy-data:
+  caddy-config:
+  pg-data:

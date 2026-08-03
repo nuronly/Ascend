@@ -10,7 +10,7 @@
 
 ---
 
-## 快速开始
+## 快速开始（本地）
 
 ```bash
 cp backend/.env.example backend/.env    # 填入 API key
@@ -21,6 +21,57 @@ cp backend/.env.example backend/.env    # 填入 API key
 
 前置条件：**Node.js 18+** 和 [**uv**](https://docs.astral.sh/uv/)（会自动装 Python 3.12）。
 不需要 Docker，不需要单独安装数据库。
+
+---
+
+## 上线
+
+```bash
+cp .env.prod.example .env.prod          # 填域名、密钥、准入策略
+docker compose up -d --build
+```
+
+Caddy 会自动申请 HTTPS 证书。上线前务必跑一遍自检：
+
+```bash
+cd backend && python scripts/preflight.py                    # 检查配置
+python scripts/preflight.py --live https://your-domain.com   # 体检线上实例
+```
+
+### 三个绕不开的约束
+
+**① Serverless 平台走不通。** 大纲生成约 90 秒、正文约 70 秒，全是 SSE 长连接。
+Vercel Functions 免费版 10 秒超时、Pro 60 秒，Cloudflare Workers 更短。
+后端必须跑在长连接友好的环境（VPS / 容器 / 传统云主机）。
+
+**② 成本是最大风险，不是技术。** 多用户 + 云 API = **别人用你的 key 花你的钱**。
+所以有三道闸，公开上线时至少开一道：
+
+| 闸门 | 配置 |
+|---|---|
+| 关闭注册 | `ALLOW_REGISTRATION=false` |
+| 邀请码 | `INVITE_CODE=...` |
+| 人数上限 | `MAX_USERS=20` |
+| 每人每日额度 | `DAILY_TOKEN_QUOTA=400000` |
+| 速率限制 | `RATE_LIMIT_ENABLED=true` |
+
+**③ 反代必须关缓冲。** 用 Caddy 是因为它**默认不缓冲**，SSE 开箱即用。
+若改用 Nginx，必须显式 `proxy_buffering off;` —— 漏了就会出现
+「卡住一分钟然后内容突然全部涌出」，而且极难排查。
+
+### 部署形态
+
+单体镜像：后端同时提供 API 和前端静态文件。一个容器、一个域名、
+零 CORS、零跨域 cookie 问题。SPA fallback 已处理，刷新任意深层路由都正常。
+
+⚠️ **SQLite 只能单 worker**（多进程写会锁竞争）。需要多 worker 时：
+
+```bash
+docker compose --profile pg up -d
+# 然后把 .env.prod 的 DATABASE_URL 改成 postgresql+asyncpg://...
+```
+
+数据库和勋章图片都在 `ladder-data` 卷里，重建容器不会丢。
 
 ---
 

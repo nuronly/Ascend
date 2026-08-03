@@ -24,6 +24,27 @@ class Settings(BaseSettings):
     app_host: str = "127.0.0.1"
     app_port: int = 8788
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    # 生产环境的公开地址，用于 cookie 域与自检提示
+    public_url: str = ""
+
+    # ── ★ 准入控制（上线的第一道闸）──
+    # 多用户 + 云 API = 别人用你的 key 花你的钱。
+    # 公开上线时必须关闭自由注册，或者设置邀请码。
+    allow_registration: bool = True
+    invite_code: str = ""
+    # 全站用户数上限，0 = 不限
+    max_users: int = 0
+
+    # ── 静态前端（单体部署时由后端直接提供）──
+    serve_frontend: bool = False
+    frontend_dist: str = ""
+
+    # ── 速率限制（每 IP）──
+    rate_limit_enabled: bool = False
+    # 认证类端点：防撞库
+    rate_auth_per_minute: int = 10
+    # AI 类端点：防刷额度
+    rate_ai_per_minute: int = 20
 
     # ── 鉴权 ──
     jwt_secret: str = "dev-only-secret-please-change-me"
@@ -112,6 +133,43 @@ class Settings(BaseSettings):
         d = BACKEND_DIR / "data"
         d.mkdir(parents=True, exist_ok=True)
         return d
+
+    @property
+    def is_prod(self) -> bool:
+        return self.app_env in ("prod", "production")
+
+    @property
+    def dist_path(self) -> Path | None:
+        if not self.serve_frontend:
+            return None
+        p = (
+            Path(self.frontend_dist)
+            if self.frontend_dist
+            else BACKEND_DIR.parent / "frontend" / "dist"
+        )
+        return p if (p / "index.html").exists() else None
+
+    def production_warnings(self) -> list[str]:
+        """上线自检。启动时打印，把容易漏的坑摆到眼前。"""
+        w: list[str] = []
+        if not self.is_prod:
+            return w
+        if self.jwt_secret in ("", "dev-only-secret-please-change-me") or len(self.jwt_secret) < 32:
+            w.append("JWT_SECRET 仍是默认值或过短 —— 任何人都能伪造登录态")
+        if not self.cookie_secure:
+            w.append("COOKIE_SECURE=false —— HTTPS 下应设为 true，否则 cookie 会明文传输")
+        if self.allow_registration and not self.invite_code and not self.max_users:
+            w.append(
+                "注册完全开放且无邀请码 —— 别人注册后会消耗你的 LLM 额度，"
+                "建议设置 INVITE_CODE 或 MAX_USERS"
+            )
+        if self.daily_token_quota <= 0:
+            w.append("DAILY_TOKEN_QUOTA=0（不限额）—— 单个用户就能刷爆你的账单")
+        if not self.rate_limit_enabled:
+            w.append("未开启速率限制 —— 建议 RATE_LIMIT_ENABLED=true")
+        if self.is_sqlite:
+            w.append("使用 SQLite —— 单进程可用；若要多 worker 请切换到 PostgreSQL")
+        return w
 
 
 @lru_cache

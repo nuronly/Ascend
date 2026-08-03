@@ -1,0 +1,60 @@
+# ─────────────────────────────────────────────────────────────
+#  阶梯 · Caddy 配置
+#
+#  选 Caddy 而不是 Nginx 的原因：
+#    1. 自动申请并续期 HTTPS 证书，零配置
+#    2. **默认不缓冲响应** —— SSE 开箱即用。
+#       Nginx 必须显式关掉 proxy_buffering，漏了就会出现
+#       「卡住 60 秒然后内容突然全部涌出」，而且极难排查
+# ─────────────────────────────────────────────────────────────
+
+{$DOMAIN} {
+	encode zstd gzip
+
+	# ── 安全响应头 ──
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# 本产品渲染大量 LLM 生成的 Markdown，CSP 是 sanitize 之外的第二道防线。
+		# 说明：Vite 产物需要 wasm-unsafe-eval（Shiki 的 oniguruma 引擎），
+		#       style-src 需要 unsafe-inline（KaTeX 会注入行内样式）。
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		-Server
+	}
+
+	# ── 静态资源：内容哈希文件名，可以长缓存 ──
+	@assets path /assets/*
+	header @assets Cache-Control "public, max-age=31536000, immutable"
+
+	# ── SSE：绝不能缓冲，也不能被超时掐断 ──
+	# 大纲生成要 90 秒上下，正文 70 秒，默认超时会在中途断开
+	@sse {
+		path /api/*
+		header Accept text/event-stream
+	}
+	reverse_proxy @sse app:8788 {
+		flush_interval -1
+		transport http {
+			read_timeout 600s
+			write_timeout 600s
+		}
+	}
+
+	# ── 其余请求 ──
+	reverse_proxy app:8788 {
+		transport http {
+			read_timeout 300s
+			write_timeout 300s
+		}
+	}
+
+	log {
+		output file /data/access.log {
+			roll_size 20mb
+			roll_keep 5
+		}
+		format console
+	}
+}
