@@ -1,0 +1,521 @@
+"""卡片 API（PLAN §3.2）。"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter, HTTPException, Query, Request, status
+from pydantic import BaseModel, Field
+from sqlalchemy import Integer, func, inspect as sa_inspect, or_, select
+
+from app.api.deps import CurrentUser, Scope, user_quota
+from app.api.sse import sse_response
+from app.core.types import new_id, utcnow
+from app.models.card import (
+    LINK_POTENTIAL,
+    LINK_REAL,
+    ORIGIN_MANUAL,
+    ORIGIN_PARENT_ANSWER,
+    ORIGIN_PARENT_NOTE,
+    ORIGIN_SOURCE_TEXT,
+    RELATIONS,
+    STATE_ARCHIVED,
+    STATE_DRAFT,
+    STATE_VAULT,
+    Card,
+    CardLink,
+    CardMessage,
+)
+from app.services import card as svc
+
+router = APIRouter(prefix="/cards", tags=["cards"])
+
+
+# ─────────────────────────────────────────────────────────────
+# Schemas
+# ─────────────────────────────────────────────────────────────
+class CreateCardIn(BaseModel):
+    selected_text: str = Field(min_length=1, max_length=2000)
+    question: str = Field(default="", max_length=2000)
+    context_text: str = Field(default="", max_length=4000)
+    source_type: str = Field(default="course", pattern="^(course|doc|brain)$")
+    source_section_id: str | None = None
+    source_doc_block_id: str | None = None
+    text_anchor: dict[str, Any] = {}
+    parent_card_id: str | None = None
+    origin: str = Field(
+        default=ORIGIN_SOURCE_TEXT,
+        pattern="^(source_text|parent_answer|parent_note|manual)$",
+    )
+    origin_message_id: str | None = None
+    origin_offset: dict[str, Any] = {}
+
+
+class AskIn(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+
+
+class NoteIn(BaseModel):
+    user_note: str = Field(max_length=20000)
+
+
+class PositionIn(BaseModel):
+    canvas_x: float
+    canvas_y: float
+
+
+class BulkPositionIn(BaseModel):
+    positions: dict[str, PositionIn]
+
+
+class CollapseIn(BaseModel):
+    collapsed: bool
+
+
+class LinkIn(BaseModel):
+    to_card_id: str
+    relation: str = Field(default="continuation")
+    note: str = Field(default="", max_length=1000)
+
+
+class LinkUpdateIn(BaseModel):
+    relation: str | None = None
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class BulkStateIn(BaseModel):
+    card_ids: list[str] = Field(min_length=1, max_length=200)
+    state: str = Field(pattern="^(draft|vault|archived)$")
+
+
+# ─────────────────────────────────────────────────────────────
+# 序列化
+# ─────────────────────────────────────────────────────────────
+def card_dict(c: Card, *, with_messages: bool = True) -> dict:
+    d = {
+        "id": c.id,
+        "question": c.question,
+        "ai_answer": c.ai_answer,
+        "user_note": c.user_note,
+        "is_rewritten": c.is_rewritten,
+        "summary": c.summary,
+        "concept_tags": list(c.concept_tags or []),
+        "source_type": c.source_type,
+        "source_section_id": c.source_section_id,
+        "source_doc_block_id": c.source_doc_block_id,
+        "selected_text": c.selected_text,
+        "context_text": c.context_text,
+        "text_anchor": c.text_anchor or {},
+        "origin": c.origin,
+        "origin_message_id": c.origin_message_id,
+        "origin_offset": c.origin_offset or {},
+        "canvas_x": c.canvas_x,
+        "canvas_y": c.canvas_y,
+        "collapsed": c.collapsed,
+        "pinned": c.pinned,
+        "parent_card_id": c.parent_card_id,
+        "luhmann_id": c.luhmann_id,
+        "depth": c.depth,
+        "pomodoro_id": c.pomodoro_id,
+        "state": c.state,
+        "touch_count": c.touch_count,
+        "created_at": c.created_at.isoformat(),
+        "last_touched_at": c.last_touched_at.isoformat() if c.last_touched_at else None,
+    }
+    if with_messages:
+        # 刚 create 出来的实例没走过查询，messages 尚未加载。
+        # 在同步代码里碰它会触发懒加载 IO → MissingGreenlet。
+        # 这里显式检查加载状态，未加载就当作空列表。
+        loaded = "messages" not in sa_inspect(c).unloaded
+        d["messages"] = (
+            [
+                {
+                    "id": m.id,
+                    "seq": m.seq,
+                    "role": m.role,
+                    "content": m.content,
+                    "status": m.status,
+                    "created_at": m.created_at.isoformat(),
+                }
+                for m in c.messages
+            ]
+            if loaded
+            else []
+        )
+    return d
+
+
+def link_dict(link: CardLink) -> dict:
+    return {
+        "id": link.id,
+        "from_card_id": link.from_card_id,
+        "to_card_id": link.to_card_id,
+        "kind": link.kind,
+        "relation": link.relation,
+        "note": link.note,
+        "confidence": link.confidence,
+        "created_by": link.created_by,
+        "promoted_at": link.promoted_at.isoformat() if link.promoted_at else None,
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# 查询
+# ─────────────────────────────────────────────────────────────
+@router.get("")
+async def list_cards(
+    scope: Scope,
+    section_id: str | None = None,
+    doc_id: str | None = None,
+    state: str | None = Query(None, pattern="^(draft|vault|archived)$"),
+    pomodoro_id: str | None = None,
+    limit: int = Query(200, le=500),
+) -> dict:
+    """小节内的全部卡片 + 卡片之间的连线。
+
+    这是卡片空间的主数据源 —— 一次拿全，前端不再逐张请求。
+    """
+    stmt = scope.select(Card)
+    if section_id:
+        await scope.require_section(section_id)
+        stmt = stmt.where(Card.source_section_id == section_id)
+    if pomodoro_id:
+        stmt = stmt.where(Card.pomodoro_id == pomodoro_id)
+    if state:
+        stmt = stmt.where(Card.state == state)
+    else:
+        stmt = stmt.where(Card.state != STATE_ARCHIVED)
+
+    cards = await scope.all(stmt.order_by(Card.created_at).limit(limit))
+    ids = [c.id for c in cards]
+
+    links: list[CardLink] = []
+    if ids:
+        links = await scope.all(
+            scope.select(CardLink).where(
+                or_(CardLink.from_card_id.in_(ids), CardLink.to_card_id.in_(ids)),
+                CardLink.dismissed_at.is_(None),
+            )
+        )
+
+    return {
+        "cards": [card_dict(c) for c in cards],
+        "links": [link_dict(link) for link in links],
+    }
+
+
+@router.get("/{card_id}")
+async def get_card(card_id: str, scope: Scope) -> dict:
+    card = await scope.require_card(card_id)
+    d = card_dict(card)
+    d["ancestors"] = [
+        {"id": a.id, "luhmann_id": a.luhmann_id, "selected_text": a.selected_text}
+        for a in await svc.ancestors_of(scope, card)
+    ]
+    return d
+
+
+# ─────────────────────────────────────────────────────────────
+# 建卡与问答
+# ─────────────────────────────────────────────────────────────
+@router.post("", status_code=status.HTTP_201_CREATED)
+async def create_card(body: CreateCardIn, scope: Scope) -> dict:
+    if body.origin in (ORIGIN_PARENT_ANSWER, ORIGIN_PARENT_NOTE) and not body.parent_card_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "从卡片内划词必须指定 parent_card_id")
+    if body.origin == ORIGIN_SOURCE_TEXT and not (
+        body.source_section_id or body.source_doc_block_id or body.parent_card_id
+    ):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "根卡必须指定来源小节或文档段落")
+
+    card = await svc.create_card(
+        scope,
+        question=body.question,
+        selected_text=body.selected_text,
+        context_text=body.context_text,
+        source_type=body.source_type,
+        source_section_id=body.source_section_id,
+        source_doc_block_id=body.source_doc_block_id,
+        text_anchor=body.text_anchor,
+        parent_card_id=body.parent_card_id,
+        origin=body.origin,
+        origin_message_id=body.origin_message_id,
+        origin_offset=body.origin_offset,
+    )
+
+    d = card_dict(card)
+    # 链深提示：从卡片反向驱动课程生成的闭环入口（PLAN §1.4 / §3.2.0）
+    if card.depth + 1 >= svc.DEPTH_HINT_THRESHOLD:
+        d["depth_hint"] = {
+            "depth": card.depth + 1,
+            "message": "这条追问链已经很深了 —— 提炼成一张索引卡？还是生成一节专项课程？",
+        }
+    return d
+
+
+@router.post("/{card_id}/ask")
+async def ask(
+    card_id: str, body: AskIn, request: Request, scope: Scope, user: CurrentUser
+):
+    """SSE 流式回答。同一张卡可多轮（PLAN §3.2.0）。"""
+    card = await scope.require_card(card_id)
+    return await sse_response(
+        svc.stream_answer(scope, card, body.question, quota=user_quota(user)), request
+    )
+
+
+@router.post("/{card_id}/regenerate")
+async def regenerate(card_id: str, request: Request, scope: Scope, user: CurrentUser):
+    """重答最后一问：删掉末尾的一问一答，用同样的问题重新生成。"""
+    card = await scope.require_card(card_id)
+    msgs = list(card.messages)
+    last_q = next((m.content for m in reversed(msgs) if m.role == "user"), None)
+    if not last_q:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "这张卡还没有提问")
+
+    for m in reversed(msgs):
+        if m.role == "assistant":
+            await scope.session.delete(m)
+            break
+    for m in reversed(msgs):
+        if m.role == "user":
+            await scope.session.delete(m)
+            break
+    await scope.commit()
+    await scope.session.refresh(card)
+
+    return await sse_response(
+        svc.stream_answer(scope, card, last_q, quota=user_quota(user)), request
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# 编辑
+# ─────────────────────────────────────────────────────────────
+@router.patch("/{card_id}/note")
+async def update_note(card_id: str, body: NoteIn, scope: Scope) -> dict:
+    """己见 —— 卡片入仓库前的那道轻量确认动作（PLAN §1.3）。"""
+    card = await scope.require_card(card_id)
+    card.user_note = body.user_note
+    card.is_rewritten = bool(body.user_note.strip())
+    card.touch_count += 1
+    card.last_touched_at = utcnow()
+    await scope.commit()
+    if card.state == STATE_VAULT:
+        await svc.index_card(scope, card)
+    return {"ok": True, "is_rewritten": card.is_rewritten}
+
+
+@router.patch("/{card_id}/position")
+async def update_position(card_id: str, body: PositionIn, scope: Scope) -> dict:
+    """用户拖动后记住位置，此后不再跟随自动布局。"""
+    card = await scope.require_card(card_id)
+    card.canvas_x, card.canvas_y, card.pinned = body.canvas_x, body.canvas_y, True
+    await scope.commit()
+    return {"ok": True}
+
+
+@router.patch("/positions")
+async def bulk_positions(body: BulkPositionIn, scope: Scope) -> dict:
+    """批量落位。拖动是高频操作，前端 debounce 后一次提交。"""
+    cards = await scope.all(scope.select(Card).where(Card.id.in_(list(body.positions))))
+    for c in cards:
+        p = body.positions.get(c.id)
+        if p:
+            c.canvas_x, c.canvas_y, c.pinned = p.canvas_x, p.canvas_y, True
+    await scope.commit()
+    return {"updated": len(cards)}
+
+
+@router.patch("/{card_id}/collapse")
+async def collapse(card_id: str, body: CollapseIn, scope: Scope) -> dict:
+    """折叠成标题条 —— 链长了也不会淹没屏幕（PLAN §3.2.0）。"""
+    card = await scope.require_card(card_id)
+    card.collapsed = body.collapsed
+    await scope.commit()
+    return {"ok": True}
+
+
+@router.post("/{card_id}/vault")
+async def vault(card_id: str, scope: Scope, user: CurrentUser) -> dict:
+    """draft → vault。进图谱、进第二大脑、进 FSRS。"""
+    card = await scope.require_card(card_id)
+    await svc.to_vault(scope, card, quota=user_quota(user))
+    await scope.session.refresh(card)
+    d = card_dict(card)
+    d["potential_links"] = [
+        link_dict(link)
+        for link in await scope.all(
+            scope.select(CardLink).where(
+                CardLink.from_card_id == card.id,
+                CardLink.kind == LINK_POTENTIAL,
+                CardLink.dismissed_at.is_(None),
+            )
+        )
+    ]
+    return d
+
+
+@router.post("/bulk-state")
+async def bulk_state(body: BulkStateIn, scope: Scope, user: CurrentUser) -> dict:
+    """番茄结束时的批量整理 —— 勾选哪些进 vault、哪些丢弃（PLAN §3.3）。"""
+    cards = await scope.all(scope.select(Card).where(Card.id.in_(body.card_ids)))
+    for c in cards:
+        if body.state == STATE_VAULT and c.state != STATE_VAULT:
+            await svc.to_vault(scope, c, quota=user_quota(user))
+        else:
+            c.state = body.state
+    await scope.commit()
+    return {"updated": len(cards)}
+
+
+@router.delete("/{card_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_card(card_id: str, scope: Scope) -> None:
+    card = await scope.require_card(card_id)
+    await svc.delete_card(scope, card)
+
+
+# ─────────────────────────────────────────────────────────────
+# 链接：real / potential 两层（PLAN §1.1）
+# ─────────────────────────────────────────────────────────────
+@router.get("/{card_id}/links")
+async def card_links(card_id: str, scope: Scope) -> dict:
+    """★ potential 只围绕当前焦点卡返回，不全局铺开 —— 否则画布变噪音。"""
+    card = await scope.require_card(card_id)
+    rows = await scope.all(
+        scope.select(CardLink).where(
+            or_(CardLink.from_card_id == card.id, CardLink.to_card_id == card.id),
+            CardLink.dismissed_at.is_(None),
+        )
+    )
+    ids = {r.from_card_id for r in rows} | {r.to_card_id for r in rows} - {card.id}
+    peers = await scope.all(scope.select(Card).where(Card.id.in_(list(ids)))) if ids else []
+    return {
+        "links": [link_dict(r) for r in rows],
+        "peers": [card_dict(p, with_messages=False) for p in peers],
+    }
+
+
+@router.post("/{card_id}/links", status_code=status.HTTP_201_CREATED)
+async def create_link(card_id: str, body: LinkIn, scope: Scope) -> dict:
+    """用户手动建立 real link。AI 永远只能产 potential。"""
+    if body.relation not in RELATIONS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, f"关系类型必须是 {RELATIONS} 之一")
+    card = await scope.require_card(card_id)
+    target = await scope.require_card(body.to_card_id)
+    if card.id == target.id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "不能连到自己")
+
+    existing = await scope.one_or_none(
+        scope.select(CardLink).where(
+            or_(
+                (CardLink.from_card_id == card.id) & (CardLink.to_card_id == target.id),
+                (CardLink.from_card_id == target.id) & (CardLink.to_card_id == card.id),
+            )
+        )
+    )
+    if existing:
+        existing.kind = LINK_REAL
+        existing.relation = body.relation
+        existing.note = body.note
+        existing.created_by = "user"
+        existing.dismissed_at = None
+        if not existing.promoted_at:
+            existing.promoted_at = utcnow()
+        await scope.commit()
+        return link_dict(existing)
+
+    link = CardLink(
+        id=new_id(),
+        user_id=scope.user_id,
+        from_card_id=card.id,
+        to_card_id=target.id,
+        kind=LINK_REAL,
+        relation=body.relation,
+        note=body.note,
+        created_by="user",
+        created_at=utcnow(),
+    )
+    scope.add(link)
+    await scope.commit()
+    return link_dict(link)
+
+
+@router.post("/links/{link_id}/promote")
+async def promote_link(link_id: str, scope: Scope) -> dict:
+    """potential → real。只有用户能做这个动作（PLAN §1.1）。"""
+    link = await scope.require(CardLink, link_id, "连线")
+    link.kind = LINK_REAL
+    link.promoted_at = utcnow()
+    link.dismissed_at = None
+    await scope.commit()
+    return link_dict(link)
+
+
+@router.post("/links/{link_id}/dismiss", status_code=status.HTTP_204_NO_CONTENT)
+async def dismiss_link(link_id: str, scope: Scope) -> None:
+    """否掉一条 potential，此后不再推荐。"""
+    link = await scope.require(CardLink, link_id, "连线")
+    if link.kind == LINK_REAL:
+        await scope.session.delete(link)
+    else:
+        link.dismissed_at = utcnow()
+    await scope.commit()
+
+
+@router.patch("/links/{link_id}")
+async def update_link(link_id: str, body: LinkUpdateIn, scope: Scope) -> dict:
+    link = await scope.require(CardLink, link_id, "连线")
+    if body.relation is not None:
+        if body.relation not in RELATIONS:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"关系类型必须是 {RELATIONS} 之一")
+        link.relation = body.relation
+    if body.note is not None:
+        link.note = body.note
+    await scope.commit()
+    return link_dict(link)
+
+
+@router.delete("/links/{link_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_link(link_id: str, scope: Scope) -> None:
+    link = await scope.require(CardLink, link_id, "连线")
+    await scope.session.delete(link)
+    await scope.commit()
+
+
+# ─────────────────────────────────────────────────────────────
+# 统计
+# ─────────────────────────────────────────────────────────────
+@router.get("/meta/stats")
+async def card_stats(scope: Scope) -> dict:
+    """己见率是学习深度的真实指标，比学习时长诚实得多（PLAN §1.3）。"""
+    total, vaulted, rewritten, max_depth = (
+        await scope.session.execute(
+            select(
+                func.count(Card.id),
+                func.sum(func.cast(Card.state == STATE_VAULT, Integer)),
+                func.sum(func.cast(Card.is_rewritten, Integer)),
+                func.coalesce(func.max(Card.depth), 0),
+            ).where(Card.user_id == scope.user_id, Card.state != STATE_ARCHIVED)
+        )
+    ).one()
+    vaulted = int(vaulted or 0)
+    rewritten = int(rewritten or 0)
+    return {
+        "total": int(total or 0),
+        "vaulted": vaulted,
+        "drafts": int(total or 0) - vaulted,
+        "rewritten": rewritten,
+        "rewrite_rate": round(rewritten / vaulted, 3) if vaulted else 0.0,
+        "max_depth": int(max_depth or 0),
+        "real_links": int(
+            await scope.session.scalar(
+                select(func.count(CardLink.id)).where(
+                    CardLink.user_id == scope.user_id, CardLink.kind == LINK_REAL
+                )
+            )
+            or 0
+        ),
+    }
+
+
+__all__ = ["router", "card_dict", "link_dict", "STATE_DRAFT", "ORIGIN_MANUAL", "CardMessage"]

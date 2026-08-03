@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>阶梯 · 以疑问为原子单位的学习工作台</title>
+    <meta name="description" content="课程与文档只是投喂内容的入口，卡片才是核心。" />
+    <script>
+      // 在首帧之前定主题，避免深色模式下的白屏闪烁
+      (function () {
+        try {
+          var t = localStorage.getItem('ladder-theme') || 'system'
+          var dark =
+            t === 'dark' ||
+            (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches)
+          document.documentElement.classList.toggle('dark', dark)
+        } catch (e) {}
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

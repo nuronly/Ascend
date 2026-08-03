@@ -1,0 +1,38 @@
+# ── 密钥：绝不入仓（PLAN §4.1）──
+# ── ★ 密钥原始记录：绝不入仓 ──
+api.txt
+# 产品计划文档：不公开
+PLAN.md
+*.key
+*.pem
+secrets*
+
+.env
+.env.*
+!.env.example
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# ── 数据与日志 ──
+backend/data/
+backend/logs/
+*.db
+*.db-shm
+*.db-wal
+
+# ── Node ──
+node_modules/
+dist/
+.vite/
+*.tsbuildinfo
+
+# ── 编辑器 / 系统 ──
+.DS_Store
+.idea/
+.vscode/
