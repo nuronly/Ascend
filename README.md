@@ -28,11 +28,13 @@ cp backend/.env.example backend/.env    # 填入 API key
 
 ```bash
 git clone https://github.com/nuronly/Ascend.git ladder && cd ladder
-./deploy.sh
+sudo ./install.sh          # 裸机：uv + systemd + Nginx，不需要 Docker
+# 或
+./deploy.sh                # 容器：Docker Compose + Caddy 自动 HTTPS
 ```
 
-脚本会检查环境、引导填配置、构建、启动并自检。
-支持两种模式：**有备案域名**（Caddy 自动申请 HTTPS）或**只有 IP**（纯 HTTP 先跑起来）。
+两者架构相同（反代 → 后端，后端同时提供前端静态文件），
+都支持**有备案域名**（自动 HTTPS）和**只有 IP**（纯 HTTP 先跑起来）两种模式。
 
 阿里云 ECS 的逐步操作、以及各类故障的排查，见 [`DEPLOY.md`](DEPLOY.md)。
 
