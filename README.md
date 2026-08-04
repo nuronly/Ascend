@@ -27,15 +27,21 @@ cp backend/.env.example backend/.env    # 填入 API key
 ## 上线
 
 ```bash
-cp .env.prod.example .env.prod          # 填域名、密钥、准入策略
-docker compose up -d --build
+git clone https://github.com/nuronly/Ascend.git ladder && cd ladder
+./deploy.sh
 ```
 
-Caddy 会自动申请 HTTPS 证书。上线前务必跑一遍自检：
+脚本会检查环境、引导填配置、构建、启动并自检。
+支持两种模式：**有备案域名**（Caddy 自动申请 HTTPS）或**只有 IP**（纯 HTTP 先跑起来）。
+
+阿里云 ECS 的逐步操作、以及各类故障的排查，见 [`DEPLOY.md`](DEPLOY.md)。
+
+三个诊断脚本：
 
 ```bash
-cd backend && python scripts/preflight.py                    # 检查配置
-python scripts/preflight.py --live https://your-domain.com   # 体检线上实例
+docker compose exec app python scripts/preflight.py       # 上线配置自检
+docker compose exec app python scripts/check_providers.py # 逐路实测每个模型
+bash backend/scripts/check_gates.sh                       # 验证准入与限流
 ```
 
 ### 三个绕不开的约束

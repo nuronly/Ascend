@@ -42,8 +42,9 @@ services:
       - "80:80"
       - "443:443"
     environment:
-      # 在 .env.prod 里设 DOMAIN=learn.example.com
-      DOMAIN: ${DOMAIN:?请在 .env.prod 中设置 DOMAIN}
+      # 有备案域名 → SITE_ADDRESS=learn.example.com（自动 HTTPS）
+      # 只有 IP    → SITE_ADDRESS=:80（纯 HTTP，先能用）
+      SITE_ADDRESS: ${SITE_ADDRESS:-:80}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
