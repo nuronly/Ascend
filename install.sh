@@ -219,11 +219,28 @@ SERVER_NAME="_"
 [ "$SITE" != ":80" ] && SERVER_NAME="$SITE"
 
 NGX_DIR=/etc/nginx/conf.d
+NGX_CONF="$NGX_DIR/ladder.conf"
 mkdir -p "$NGX_DIR"
 # Debian 系默认站点会抢占 default_server，先挪开
 rm -f /etc/nginx/sites-enabled/default 2>/dev/null || true
 
-cat > "$NGX_DIR/ladder.conf" <<EOF
+# ★ 绝不能因为一次例行更新就把用户的 HTTPS 配置冲掉。
+#   证书签发、SSL 段落往往是手工调过的，覆盖掉等于站点从 HTTPS 掉回 HTTP，
+#   而且用户多半要等到浏览器报警才发现。
+if [ -f "$NGX_CONF" ] && grep -qE 'ssl_certificate|listen[[:space:]]+443' "$NGX_CONF"; then
+  BAK="$NGX_CONF.bak.$(date +%Y%m%d-%H%M%S)"
+  cp "$NGX_CONF" "$BAK"
+  warn "检测到已有 HTTPS 配置，保留不覆盖（已备份 $(basename "$BAK")）"
+  info "如需重置回默认 HTTP 配置：rm $NGX_CONF 后重跑本脚本"
+  # 静态资源路径可能随部署目录变化，这里只做校验不改写
+  grep -q "${ROOT}/frontend/dist/assets/" "$NGX_CONF" \
+    || warn "现有配置里的 /assets/ 路径与当前目录 ${ROOT} 不一致，前端静态资源可能 404"
+  grep -q 'proxy_buffering off' "$NGX_CONF" \
+    || warn "现有配置缺少 proxy_buffering off —— SSE 会表现为「卡住很久后内容突然涌出」"
+  NGX_KEPT=1
+else
+  NGX_KEPT=0
+  cat > "$NGX_CONF" <<EOF
 server {
     listen 80;
     server_name ${SERVER_NAME};
@@ -268,11 +285,12 @@ server {
     }
 }
 EOF
+fi
 
 nginx -t >/dev/null 2>&1 || { nginx -t; die "Nginx 配置有误"; }
 systemctl enable nginx >/dev/null 2>&1
 systemctl restart nginx
-ok "Nginx 已配置"
+[ "$NGX_KEPT" = "1" ] && ok "Nginx 已重载（沿用现有 HTTPS 配置）" || ok "Nginx 已配置"
 
 # 关掉可能拦路的本机防火墙（安全组才是真正的边界）
 systemctl stop firewalld 2>/dev/null && systemctl disable firewalld 2>/dev/null && info "已关闭 firewalld" || true
