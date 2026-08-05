@@ -123,10 +123,22 @@ cd /opt/ladder && git pull && sudo ./install.sh   # 更新
 
 数据库在 `backend/data/ladder.db`，更新部署不会动它。
 
-**备份**：
+**备份**（推荐用脚本，直接 cp 可能只复制到主文件而漏掉 WAL 里的数据）：
 
 ```bash
-cp /opt/ladder/backend/data/ladder.db ~/backup-$(date +%F).db
+/opt/ladder/backend/.venv/bin/python /opt/ladder/backend/scripts/backup.py
+# 产物在 backend/data/backups/ 下，是完整独立的单文件，自动保留最近 30 份
+
+# 想放在服务器上定时执行：
+# crontab -e 加一行：0 4 * * * /opt/ladder/backend/.venv/bin/python /opt/ladder/backend/scripts/backup.py
+```
+
+**恢复**：
+
+```bash
+systemctl stop ladder
+cp /opt/ladder/backend/data/backups/ladder-xxx.db /opt/ladder/backend/data/ladder.db
+systemctl start ladder
 ```
 
 ## 加 HTTPS（域名备案后）

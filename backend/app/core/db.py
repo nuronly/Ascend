@@ -26,7 +26,8 @@ def _make_engine():
         kwargs["connect_args"] = {"timeout": 30}
     else:  # pragma: no cover
         kwargs.update(pool_size=10, max_overflow=20, pool_pre_ping=True)
-    return create_async_engine(settings.database_url, **kwargs)
+    # 用解析后的绝对路径，行为与启动时的工作目录无关
+    return create_async_engine(settings.resolved_database_url, **kwargs)
 
 
 engine = _make_engine()
@@ -79,8 +80,29 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
     await ensure_fts(engine)
-    log.info("数据库就绪：%s", settings.database_url.split("://")[0])
+
+    if settings.is_sqlite:
+        await _sqlite_checkpoint()
+
+    log.info("数据库就绪：%s", settings.resolved_database_url.split("://")[0])
+
+
+async def _sqlite_checkpoint() -> None:
+    """把 WAL 合并回主文件并清空日志。
+
+    WAL 模式下写入先进 ladder.db-wal，主文件迟迟不更新。
+    不主动 checkpoint 的话，主文件可能一直是 4KB 空壳而数据全在
+    -wal 里 —— 谁要是只复制了主文件，数据就"消失"了。
+    启动和正常关闭时各做一次，让主文件始终承载全量数据。
+    """
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("PRAGMA wal_checkpoint(TRUNCATE)"))
+    except Exception as exc:
+        log.warning("WAL checkpoint 失败（不影响功能）：%s", exc)
 
 
 async def dispose_db() -> None:
+    if settings.is_sqlite:
+        await _sqlite_checkpoint()
     await engine.dispose()

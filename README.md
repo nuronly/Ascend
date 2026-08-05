@@ -213,7 +213,31 @@ PDF 抽出来的文本天然是碎的：一行一个片段、跨页断句、双�
 | 间隔重复 | py-fsrs |
 | 鉴权 | argon2id + JWT（httpOnly cookie） |
 
-### 数据库：SQLite 现在，Postgres 随时
+### 数据存在哪
+
+**SQLite，单个文件**：`backend/data/ladder.db`。
+
+不需要安装或"连接"数据库 —— SQLite 是嵌入式的，一个文件就是整个数据库，
+包含全部账号、课程、卡片、链接、番茄记录。配置里写着数据库 URL，
+但没有网络连接过程，应用直接读写这个文件。
+
+```bash
+# 备份（服务运行中也能执行，产物是完整独立的单文件）
+python backend/scripts/backup.py
+
+# 恢复就是放回去
+cp backend/data/backups/ladder-xxx.db backend/data/ladder.db
+```
+
+两个容易踩的坑（已在代码里处理，但值得知道）：
+
+- **WAL 模式**：写入先进 `ladder.db-wal` 日志文件，checkpoint 后才合并回主文件。
+  应用启动和正常停止时都会主动 checkpoint。**不要只复制主文件** —
+  要么用 `backup.py`，要么三个文件（.db / -wal / -shm）一起复制。
+- **路径是绝对路径**：配置里的相对路径会被解析为基于 `backend/` 目录的
+  绝对路径，从任何目录启动读到的都是同一个库。
+
+### 之后切到 PostgreSQL
 
 方言差异全部收敛在 [`core/types.py`](backend/app/core/types.py) 和 [`search/fts.py`](backend/app/search/fts.py)，
 业务模型只写一套：
@@ -224,15 +248,8 @@ PDF 抽出来的文本天然是碎的：一行一个片段、跨页断句、双�
 | 向量召回 | float32 BLOB + numpy 余弦 | pgvector + HNSW |
 | JSONB | JSON1 | JSONB |
 
-切换方式：
-
-```bash
-# backend/.env
-DATABASE_URL=postgresql+asyncpg://ladder:ladder@localhost:5432/ladder
-```
-```bash
-cd backend && uv sync --extra postgres
-```
+切换只需改 `.env` 里 `DATABASE_URL` 一行 + `uv sync --extra postgres`。
+数据迁移走 `/api/export/json`（全量无损导出）再导入即可。
 
 > ⚠️ 表结构按设计文档 §5 **一次埋齐**，没有因为用 SQLite 就打折。
 > 这是全计划里风险等级最高的一条：字段现在不埋，第二大脑就无米下炊，

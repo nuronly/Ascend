@@ -135,6 +135,23 @@ class Settings(BaseSettings):
         return d
 
     @property
+    def resolved_database_url(self) -> str:
+        """把 SQLite 的相对路径解析为基于 backend/ 目录的绝对路径。
+
+        ⚠️ 不这么做有个很隐蔽的坑：`sqlite+aiosqlite:///./data/ladder.db`
+        里的 `./` 是相对**启动时的工作目录**。从 backend/ 启动是一个库，
+        从仓库根目录启动就会在根目录新建一个空库 —— 换个目录启动，
+        数据就"消失了"。一律解析成绝对路径，行为与启动位置无关。
+        """
+        url = self.database_url
+        prefix = "sqlite+aiosqlite:///"
+        if url.startswith(prefix):
+            rel = url[len(prefix) :]
+            if rel and not rel.startswith("/"):
+                return prefix + str((BACKEND_DIR / rel).resolve())
+        return url
+
+    @property
     def is_prod(self) -> bool:
         return self.app_env in ("prod", "production")
 
