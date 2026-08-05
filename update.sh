@@ -18,23 +18,74 @@ B=$'\033[1m'; G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; D=$'\033[2m'; X=$'\03
 ok()   { printf "${G}✓${X} %s\n" "$1"; }
 warn() { printf "${Y}!${X} %s\n" "$1"; }
 die()  { printf "${R}✗${X} %s\n" "$1"; exit 1; }
+# 精简过的系统镜像里可能没有 timeout，缺了也不该让整个脚本挂掉
+run_timeout() {
+  if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi
+}
 
 # root 操作非 root 克隆的仓库时，git 会以 dubious ownership 拒绝 —
 # 报错混在一堆输出里极容易被忽略，结果"更新了"其实一行代码都没变。
 git config --global --add safe.directory "$ROOT" 2>/dev/null || true
 
 OLD=$(git rev-parse HEAD)
+BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)
+[ "$BRANCH" = "HEAD" ] && BRANCH=main
 
 # 服务器上的本地改动（如果有）先暂存，pull 完再恢复
 STASHED=0
+
+# 无论脚本怎么退出（包括 die 和 Ctrl+C），暂存的改动都必须还回去。
+# 否则用户的本地修改会悄无声息地留在 stash 里，下次更新又叠一层，最后没人记得。
+restore_stash() {
+  [ "$STASHED" = "1" ] || return 0
+  STASHED=0
+  if git stash pop -q 2>/dev/null; then
+    warn "已恢复服务器上的本地改动"
+  else
+    warn "本地改动恢复失败（多半是与新代码冲突），内容仍在：git stash list / git stash pop"
+  fi
+}
+trap restore_stash EXIT INT TERM
+
 if ! git diff --quiet || ! git diff --cached --quiet; then
   git stash push -q -m "update.sh 自动暂存" && STASHED=1
   warn "服务器上有本地改动，已暂存（更新后自动恢复）"
 fi
 
-git pull --ff-only -q || die "git pull 失败。执行 git log --oneline -3 和 git status 把输出发给开发者"
+# GitHub 在国内服务器上经常被重置（典型报错：Empty reply from server / TLS handshake failure）。
+# 这时脚本不该直接躺倒 —— 依次退到公共镜像。
+# 另外这里刻意不加 -q：静默的 pull 卡住时，用户看到的只是一个不动的光标，
+# 完全无法判断是在下载、在等网络、还是在等着输密码。
+UPSTREAM=$(git remote get-url origin 2>/dev/null || echo '')
+MIRRORS=("")
+case "$UPSTREAM" in
+  https://*) MIRRORS+=("https://ghfast.top/" "https://gh-proxy.com/" "https://ghproxy.net/") ;;
+esac
+
+PULLED=0
+for M in "${MIRRORS[@]}"; do
+  if [ -z "$M" ]; then
+    LABEL="origin"; SRC="origin"
+  else
+    LABEL="镜像 $(echo "$M" | cut -d/ -f3)"; SRC="${M}${UPSTREAM}"
+  fi
+  printf "${D}  拉取（%s）…${X}\n" "$LABEL"
+  # GIT_TERMINAL_PROMPT=0：仓库若变成私有，宁可立刻失败也不要卡在密码提示上
+  if GIT_TERMINAL_PROMPT=0 run_timeout 120 git pull --ff-only "$SRC" "$BRANCH"; then
+    PULLED=1
+    [ -n "$M" ] && warn "直连 GitHub 失败，本次经由 $LABEL 更新"
+    break
+  fi
+  warn "$LABEL 不通"
+done
+
+[ "$PULLED" = "1" ] || die "所有源都拉不下来。可在本机执行：
+    rsync -avz --delete --exclude node_modules --exclude .venv --exclude dist \\
+      --exclude '*.db*' --exclude .env --exclude .git ./ root@<服务器IP>:$ROOT/
+  然后在服务器上直接执行 ./install.sh"
+
 NEW=$(git rev-parse HEAD)
-[ "$STASHED" = "1" ] && git stash pop -q || true
+restore_stash
 
 if [ "$OLD" = "$NEW" ]; then
   ok "已是最新（${NEW:0:7}），无需更新"
