@@ -87,13 +87,36 @@ app.middleware("http")(rate_limit_middleware)
 _SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
+def _is_same_origin(origin: str, request: Request) -> bool:
+    """判断 Origin 是否与当前站点同源。
+
+    浏览器对 POST 总会带上 Origin —— 同站的也带。
+    之前的实现只认 CORS_ORIGINS 白名单，于是 IP 部署
+    （白名单为空）时连自己站点的登录请求都被 403 掉。
+    正确的做法是：同源直接放行，跨源才查白名单。
+    """
+    from urllib.parse import urlparse
+
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+    if not host:
+        return False
+    return urlparse(origin).netloc == host
+
+
 @app.middleware("http")
 async def csrf_origin_guard(request: Request, call_next):
     """cookie 鉴权天然面临 CSRF。SameSite=Lax 挡住大部分，
-    但表单型 POST 仍可能带上 cookie，所以对写操作再校验一次 Origin。"""
+    但表单型 POST 仍可能带上 cookie，所以对写操作再校验一次 Origin。
+
+    放行顺序：同源 > CORS_ORIGINS 白名单 > 拒绝。
+    """
     if request.method not in _SAFE_METHODS and request.url.path.startswith("/api/"):
         origin = request.headers.get("origin")
-        if origin and origin not in settings.cors_origin_list:
+        if (
+            origin
+            and not _is_same_origin(origin, request)
+            and origin not in settings.cors_origin_list
+        ):
             return JSONResponse(
                 {"detail": "请求来源不被信任"}, status_code=status.HTTP_403_FORBIDDEN
             )
