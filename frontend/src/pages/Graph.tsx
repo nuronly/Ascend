@@ -246,17 +246,32 @@ function GraphCanvas({ courseId }: { courseId: string }) {
     return els
   }, [view, overlay, cardGraph])
 
+  // 判空必须看「节点数」而不是 elements 长度：若后端返回了边却没有对应节点，
+  // elements 非空但画布上一个东西都没有，此时既不显示空状态、也没有图，
+  // 用户只会看到一片空白，无从判断是加载失败还是真没数据
+  const nodeCount = useMemo(() => elements.filter((e) => !e.data.source).length, [elements])
+
   const fit = useCallback(() => {
     const cy = cyRef.current
-    if (!cy || !cy.elements().length) return
+    const box = boxRef.current
+    if (!cy || !box || !cy.elements().length) return
+    // ★ 容器还没定稿时（flex 尚未完成布局，clientWidth/Height 为 0）调 fit，
+    //   cytoscape 会算出 zoom≈0，把节点缩到看不见 —— 比不 fit 更糟，
+    //   而且画面表现和「没数据」一模一样，根本没法区分
+    if (!box.clientWidth || !box.clientHeight) return
     cy.resize()
     cy.fit(undefined, 48)
+    const z = cy.zoom()
+    if (!isFinite(z) || z <= 0.02) {
+      cy.zoom(1)
+      cy.center()
+    }
   }, [])
 
   // 渲染 / 重建图
   useEffect(() => {
     const box = boxRef.current
-    if (!box || !elements.length) return
+    if (!box || !nodeCount) return
 
     const cy = cytoscape({
       container: box,
@@ -271,10 +286,10 @@ function GraphCanvas({ courseId }: { courseId: string }) {
     touchedRef.current = false
 
     runLayout(cy, view)
-    // ★ 立即 fit，不要拖到 setTimeout 里。
-    //   之前只在 60ms 后 fit 一次，若那一刻容器尺寸还没稳定（flex 布局未完成），
-    //   视口就永久飘在一边，表现为"画布一片空白"，极难和"没数据"区分。
-    cy.fit(undefined, 48)
+    // 立即 fit 一次；首帧容器常常还没定稿，下一帧再补一次。
+    // 更晚的变化（窗口缩放、侧栏展开）由下面的 ResizeObserver 兜住
+    fit()
+    const raf = requestAnimationFrame(fit)
 
     cy.on('mousedown wheel', () => {
       touchedRef.current = true
@@ -326,16 +341,17 @@ function GraphCanvas({ courseId }: { courseId: string }) {
     // 但用户自己调过视角之后就别再抢镜头了
     const ro = new ResizeObserver(() => {
       cy.resize()
-      if (!touchedRef.current) cy.fit(undefined, 48)
+      if (!touchedRef.current) fit()
     })
     ro.observe(box)
 
     return () => {
+      cancelAnimationFrame(raf)
       ro.disconnect()
       cy.destroy()
       cyRef.current = null
     }
-  }, [elements, view, dark])
+  }, [elements, nodeCount, view, dark, fit])
 
   const reinforce = async (concept: string) => {
     setReinforcing(concept)
@@ -418,7 +434,7 @@ function GraphCanvas({ courseId }: { courseId: string }) {
             <div className="absolute inset-0 flex items-center justify-center">
               <Spinner className="size-5 text-[var(--text-subtle)]" />
             </div>
-          ) : !elements.length ? (
+          ) : !nodeCount ? (
             <div className="absolute inset-0 flex items-center justify-center">
               <div className="text-center max-w-sm px-6">
                 <div className="text-[14px] font-medium text-[var(--text)]">图还是空的</div>

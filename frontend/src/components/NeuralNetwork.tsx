@@ -56,7 +56,9 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
   const viewRef = useRef({ x: 0, y: 0, k: 1 })
   const hoverRef = useRef<Body | null>(null)
   const timelineRef = useRef(timeline)
-  const [hovered, setHovered] = useState<Body | null>(null)
+  // 悬停卡跟随鼠标。曾经固定在左下角，结果和「网络才 N 个神经元」那条提示
+  // 叠在同一个位置，两张卡片直接糊在一起
+  const [hovered, setHovered] = useState<{ body: Body; x: number; y: number } | null>(null)
 
   // draw 是每帧跑的 useCallback([])，配色只能through ref 递进去
   const dark = useIsDark()
@@ -355,8 +357,13 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
       const hit = layoutRef.current?.hitTest(p.x, p.y, 6 / viewRef.current.k) ?? null
       if (hit !== hoverRef.current) {
         hoverRef.current = hit
-        setHovered(hit)
         wrap.style.cursor = hit ? 'pointer' : 'grab'
+      }
+      if (hit) {
+        const rect = wrap.getBoundingClientRect()
+        setHovered({ body: hit, x: e.clientX - rect.left, y: e.clientY - rect.top })
+      } else if (hoverRef.current === null) {
+        setHovered(null)
       }
     }
     const onUp = (e: MouseEvent) => {
@@ -418,32 +425,37 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
         </div>
       )}
 
-      {/* hover 卡片浮层 */}
+      {/* 悬停卡：跟着鼠标走，且贴近边缘时自动翻边，免得被容器裁掉 */}
       {hovered && (
         <div
-          className="absolute left-3 bottom-3 max-w-[300px] px-3 py-2 rounded-[var(--radius)] bg-[var(--bg-raised)] border border-[var(--border)] pointer-events-none"
-          style={{ boxShadow: 'var(--shadow-float)' }}
+          className="absolute z-20 w-[260px] px-3 py-2 rounded-[var(--radius)] bg-[var(--bg-raised)] border border-[var(--border)] pointer-events-none"
+          style={{
+            left: Math.min(Math.max(hovered.x, 8), (wrapRef.current?.clientWidth ?? 0) - 268),
+            top: hovered.y > 150 ? hovered.y - 12 : hovered.y + 18,
+            transform: hovered.y > 150 ? 'translateY(-100%)' : undefined,
+            boxShadow: 'var(--shadow-float)',
+          }}
         >
           <div className="flex items-center gap-1.5">
             <span className="font-mono text-[9.5px] text-[var(--text-subtle)]">
-              {hovered.luhmann_id}
+              {hovered.body.luhmann_id}
             </span>
             <span className="text-[12px] font-medium text-[var(--text)] truncate">
-              ⟨{hovered.term || hovered.label}⟩
+              ⟨{hovered.body.term || hovered.body.label}⟩
             </span>
           </div>
-          {hovered.label && hovered.label !== hovered.term && (
+          {hovered.body.label && hovered.body.label !== hovered.body.term && (
             <div className="text-[11.5px] text-[var(--text-muted)] mt-1 leading-relaxed line-clamp-2">
-              {hovered.label}
+              {hovered.body.label}
             </div>
           )}
           <div className="flex flex-wrap gap-x-2.5 gap-y-0.5 mt-1.5 text-[10px] text-[var(--text-subtle)]">
-            <span>记忆强度 {Math.round(hovered.strength * 100)}%</span>
-            <span>连接 {hovered.degree}</span>
-            <span>回想 {hovered.touch} 次</span>
-            {hovered.rewritten && <span className="text-[var(--sem-rewritten)]">己见</span>}
-            {hovered.due && <span className="text-[var(--sem-due)]">待复习</span>}
-            {hovered.isolated && <span className="opacity-70">孤岛</span>}
+            <span>记忆强度 {Math.round(hovered.body.strength * 100)}%</span>
+            <span>连接 {hovered.body.degree}</span>
+            <span>回想 {hovered.body.touch} 次</span>
+            {hovered.body.rewritten && <span className="text-[var(--sem-rewritten)]">己见</span>}
+            {hovered.body.due && <span className="text-[var(--sem-due)]">待复习</span>}
+            {hovered.body.isolated && <span className="opacity-70">孤岛</span>}
           </div>
         </div>
       )}
