@@ -292,10 +292,32 @@ fi
 "$ROOT/backend/.venv/bin/python" "$ROOT/backend/scripts/preflight.py" 2>/dev/null || true
 
 # ── 完成 ─────────────────────────────────────────────────────
-IP=$(curl -fsS -m 5 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}')
+detect_public_ip() {
+  local url ip
+  for url in https://api.ipify.org https://ifconfig.me https://ip.sb https://myip.ipip.net; do
+    ip=$(curl -fsS -m 4 "$url" 2>/dev/null | tr -d '[:space:]' || true)
+    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      case "$ip" in
+        # 探测到内网段不算数，继续试下一个源
+        10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[0-2][0-9].*) continue ;;
+        *) echo "$ip"; return 0 ;;
+      esac
+    fi
+  done
+  return 1
+}
+
+IP=$(detect_public_ip || true)
 printf "\n${B}部署完成${X}\n\n"
 if [ "$SITE" = ":80" ]; then
-  printf "  访问地址  ${B}http://%s${X}\n\n" "$IP"
+  if [ -n "${IP:-}" ]; then
+    printf "  访问地址  ${B}http://%s${X}\n\n" "$IP"
+  else
+    # 探测不到就明说，绝不能打印内网 IP（172.x / 10.x / 192.168.x）误导
+    printf "  访问地址  ${B}http://<你的公网IP>${X}\n\n"
+    warn "未能自动探测公网 IP —— 到阿里云控制台 ECS 实例详情页查看「公网 IP」"
+    info "注意区分：172.x.x.x / 10.x.x.x / 192.168.x.x 都是内网 IP，外部访问不了"
+  fi
   warn "打不开的话，99% 是${B}阿里云安全组没放行 80 端口${X}"
   info "控制台 → ECS 实例 → 安全组 → 配置规则 → 入方向 → 手动添加 80/80，0.0.0.0/0"
 else
