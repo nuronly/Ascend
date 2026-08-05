@@ -165,7 +165,11 @@ if [ "$SITE" = ":80" ]; then
   sed -i "s|^COOKIE_SECURE=.*|COOKIE_SECURE=false|" "$ENVF"
   warn "IP + HTTP 模式（已自动关闭 Secure cookie）"
 else
-  ok "域名模式：$SITE"
+  # 域名模式：HTTPS 下必须打开 Secure，并把 CORS / 公开地址同步到域名
+  sed -i "s|^COOKIE_SECURE=.*|COOKIE_SECURE=true|" "$ENVF"
+  sed -i "s|^CORS_ORIGINS=.*|CORS_ORIGINS=https://${SITE}|" "$ENVF"
+  sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=https://${SITE}|" "$ENVF"
+  ok "域名模式：$SITE（Secure cookie 与 CORS 已同步）"
 fi
 
 # ── 6. systemd ───────────────────────────────────────────────
