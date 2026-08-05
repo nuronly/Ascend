@@ -99,7 +99,22 @@ if [ "$SKIP_BUILD" = "1" ]; then
   [ -f frontend/dist/index.html ] || die "--skip-build 需要 frontend/dist 已存在（可在本地构建后上传）"
   ok "沿用已有的 frontend/dist"
 else
-  if ! command -v node >/dev/null 2>&1 || [ "$(node -v 2>/dev/null | tr -d 'v' | cut -d. -f1)" -lt 18 ] 2>/dev/null; then
+  # ★ 必须真的把 node 跑起来才算数，不能只看 command -v。
+  #   conda 之类的环境里常留着失效的 node 软链/shim：命令查得到、一执行就
+  #   command not found。原来的判断因此跳过安装，接着无条件打印「✓ Node」，
+  #   npm 全部静默失败，脚本一路绿灯走完 —— 前端其实一次都没构建，
+  #   而用户只会看到「更新完了但界面纹丝不动」。
+  # 只用 bash 内建做版本解析，不依赖 tr/cut —— 少一个能出岔子的环节
+  node_ok() {
+    local v
+    v=$(node -v 2>/dev/null) || return 1
+    v=${v#v}
+    v=${v%%.*}
+    [ "${v:-0}" -ge 18 ] 2>/dev/null
+  }
+
+  if ! node_ok; then
+    command -v node >/dev/null 2>&1 && warn "已有的 node 不可用或版本过低，重新安装"
     info "安装 Node.js 22（走国内镜像）…"
     NODE_VER=v22.14.0
     ARCH=$(uname -m); case "$ARCH" in x86_64) NARCH=x64 ;; aarch64) NARCH=arm64 ;; *) die "不支持的架构 $ARCH" ;; esac
@@ -107,20 +122,38 @@ else
       || curl -fsSL "https://nodejs.org/dist/${NODE_VER}/node-${NODE_VER}-linux-${NARCH}.tar.xz" -o /tmp/node.tar.xz \
       || die "Node 下载失败"
     mkdir -p /usr/local/lib/nodejs && tar -xJf /tmp/node.tar.xz -C /usr/local/lib/nodejs
-    ln -sf "/usr/local/lib/nodejs/node-${NODE_VER}-linux-${NARCH}/bin/node" /usr/local/bin/node
-    ln -sf "/usr/local/lib/nodejs/node-${NODE_VER}-linux-${NARCH}/bin/npm" /usr/local/bin/npm
+    NODE_HOME="/usr/local/lib/nodejs/node-${NODE_VER}-linux-${NARCH}/bin"
+    ln -sf "$NODE_HOME/node" /usr/local/bin/node
+    ln -sf "$NODE_HOME/npm" /usr/local/bin/npm
+    ln -sf "$NODE_HOME/npx" /usr/local/bin/npx 2>/dev/null || true
     rm -f /tmp/node.tar.xz
+    # conda 等环境可能把自己的 bin 排在 /usr/local/bin 前面，抢走 node
+    export PATH="$NODE_HOME:$PATH"
+    hash -r 2>/dev/null || true
   fi
+
+  node_ok || die "Node 装完仍然跑不起来：$(command -v node || echo '不在 PATH 中')
+  多半是 PATH 里有失效的 node（conda / nvm 残留）。可执行：
+    which -a node          # 看是谁在抢
+    /usr/local/bin/node -v # 确认新装的能跑"
   ok "Node $(node -v)"
 
   cd "$ROOT/frontend"
   npm config set registry https://registry.npmmirror.com >/dev/null 2>&1
   info "安装前端依赖…"
   npm ci --no-audit --no-fund --silent || npm install --no-audit --no-fund --silent || die "npm 安装失败"
+
+  # 构建日志落盘。原来 >/dev/null 2>&1 把一切吞掉，构建失败时
+  # 只剩一句「构建失败」，OOM 还是语法错完全分不出来
   info "构建前端（约 1~3 分钟）…"
-  NODE_OPTIONS="--max-old-space-size=1536" npm run build >/dev/null 2>&1 \
-    || die "前端构建失败。内存不足的话，可在本地 npm run build 后把 dist 传上来，再执行 ./install.sh --skip-build"
-  ok "前端构建完成"
+  BUILD_LOG=/tmp/ladder-build.log
+  if ! NODE_OPTIONS="--max-old-space-size=1536" npm run build >"$BUILD_LOG" 2>&1; then
+    tail -25 "$BUILD_LOG"
+    die "前端构建失败，完整日志见 $BUILD_LOG
+  若是内存不足（Killed / heap out of memory），可在本地 npm run build 后
+  把 frontend/dist 传上来，再执行 ./install.sh --skip-build"
+  fi
+  ok "前端构建完成（$(grep -oE 'index-[A-Za-z0-9_-]+\.js' dist/index.html | head -1)）"
   cd "$ROOT"
 fi
 
