@@ -58,11 +58,16 @@ else
   ok "服务已重启"
 fi
 
-# 验证新代码真的生效了：同源请求不该再被 CSRF 中间件 403
+# 验证新代码真的生效了。
+# 注意：探测时必须让 Host 与 Origin 一致（模拟浏览器的真实同源请求），
+# 否则 CSRF 中间件会正确地把它们拦下，造成"修复没生效"的误判。
 printf "\n${B}验证…${X}\n"
+HOST_IP=$(grep -oE '^SITE_ADDRESS=.*' backend/.env 2>/dev/null | cut -d= -f2 | tr -d ' ')
+[ -z "$HOST_IP" ] || [ "$HOST_IP" = ":80" ] && HOST_IP="127.0.0.1"
 CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 10 -X POST http://127.0.0.1/api/auth/login \
   -H "Content-Type: application/json" \
-  -H "Origin: http://47.100.80.178" \
+  -H "Host: ${HOST_IP}" \
+  -H "Origin: http://${HOST_IP}" \
   -d '{"email":"probe@example.com","password":"probe-password"}' || echo "000")
 case "$CODE" in
   401|200) ok "同源请求正常通过（$CODE）" ;;
