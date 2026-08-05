@@ -12,7 +12,14 @@ from sqlalchemy import select
 from app.core.config import TIER_FLAGSHIP, TIER_STANDARD
 from app.core.scope import UserScope
 from app.core.types import new_id, utcnow
-from app.llm import Message, chat, chat_json, extract_json, stream_chat
+from app.llm import (
+    Message,
+    chat,
+    chat_json,
+    extract_json,
+    repair_truncated_json,
+    stream_chat,
+)
 from app.models.course import (
     COURSE_FAILED,
     COURSE_READY,
@@ -104,8 +111,20 @@ async def stream_outline(
         yield {"event": "error", "data": {"message": str(exc)[:400]}}
         return
 
+    raw = "".join(buf)
+    truncated = False
     try:
-        data = extract_json("".join(buf))
+        try:
+            data = extract_json(raw)
+        except ValueError:
+            # 大纲动辄几十个小节，很容易在最后一节耗尽 token。
+            # 整份丢掉太可惜 —— 砍掉残缺的尾巴，把前面完整的章节救回来。
+            repaired = repair_truncated_json(raw)
+            if repaired is None:
+                raise  # 不是截断，是真的坏数据，照常报错
+            data = json.loads(repaired)
+            truncated = True
+            log.warning("大纲输出被截断（%d 字符），已修复并保留前面的完整章节", len(raw))
         await _persist_outline(scope, course, data)
     except Exception as exc:
         course.status = COURSE_FAILED
@@ -115,7 +134,11 @@ async def stream_outline(
         yield {"event": "error", "data": {"message": f"大纲解析失败：{str(exc)[:300]}"}}
         return
 
-    yield {"event": "done", "data": {"course_id": course.id, "title": course.title}}
+    # truncated 必须让用户知道：悄悄接受残缺大纲比直接报错更糟
+    yield {
+        "event": "done",
+        "data": {"course_id": course.id, "title": course.title, "truncated": truncated},
+    }
 
 
 async def generate_outline(
@@ -154,6 +177,13 @@ async def _persist_outline(scope: UserScope, course: Course, data: dict) -> Cour
     course.description = (data.get("description") or "").strip()
 
     chapters_in = data.get("chapters") or []
+    # 丢掉没有小节的空壳章。截断修复后最后一章常常只剩个标题，
+    # 留着会在课程页显示成一个点不开的空章节。
+    kept = [c for c in chapters_in if isinstance(c, dict) and (c.get("sections") or [])]
+    if len(kept) != len(chapters_in):
+        log.warning("丢弃 %d 个没有小节的空壳章节", len(chapters_in) - len(kept))
+    chapters_in = kept
+
     if not chapters_in:
         course.status = COURSE_FAILED
         course.error = "模型没有返回任何章节"

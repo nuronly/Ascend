@@ -105,6 +105,51 @@ def extract_json(text: str) -> Any:
     raise ValueError(f"无法从 LLM 输出中解析 JSON：{text[:300]}")
 
 
+def repair_truncated_json(text: str) -> str | None:
+    """把被 max_tokens 截断的 JSON 补完整，救不回来则返回 None。
+
+    长输出（尤其是大纲）经常在最后一节写到一半就没了 token。整份丢掉太可惜 ——
+    砍掉那截残缺的尾巴，把前面完整的部分闭合回去，至少能保住大部分章节。
+
+    做法：扫描时维护括号栈，并记录每一层"最后一个完整元素结束"的位置
+    （遇到 , 或子容器闭合）。截断时从最内层往外找第一个有记录的层，
+    在那里下刀，再按栈把外层依次闭合。
+
+    注意这是有损修复，调用方必须让用户知道内容不完整 —— 悄悄接受残缺数据
+    比直接报错更糟。
+    """
+    stack: list[str] = []  # 待闭合的括号
+    cut_at: dict[int, int] = {}  # 层深 -> 该层最后一个完整元素的结束位置
+    in_str = esc = False
+
+    for i, ch in enumerate(text):
+        if esc:
+            esc = False
+        elif in_str and ch == "\\":
+            esc = True
+        elif ch == '"':
+            in_str = not in_str
+        elif in_str:
+            continue
+        elif ch in "{[":
+            stack.append("}" if ch == "{" else "]")
+        elif ch in "}]":
+            if not stack or stack[-1] != ch:
+                return None  # 括号都对不上，不是"截断"而是坏数据
+            stack.pop()
+            cut_at[len(stack)] = i + 1
+        elif ch == ",":
+            cut_at[len(stack)] = i
+
+    if not stack:
+        return None  # 本来就闭合完整，问题不在截断
+
+    for depth in range(len(stack), -1, -1):
+        if depth in cut_at:
+            return text[: cut_at[depth]] + "".join(reversed(stack[:depth]))
+    return None
+
+
 # ─────────────────────────────────────────────────────────────
 # 预算闸
 # ─────────────────────────────────────────────────────────────

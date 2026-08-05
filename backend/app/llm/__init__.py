@@ -14,6 +14,7 @@ from app.llm.router import (
     check_budget,
     embed,
     extract_json,
+    repair_truncated_json,
     stream_chat,
     usage_today,
 )
@@ -30,6 +31,7 @@ __all__ = [
     "check_budget",
     "embed",
     "extract_json",
+    "repair_truncated_json",
     "stream_chat",
     "usage_today",
 ]

@@ -84,14 +84,20 @@ const BASE_STYLE: cytoscape.StylesheetJson = [
       color: 'rgba(240,255,248,0.95)',
     },
   },
-  // 空白区：一个问题都没提过 —— 视觉上"暗着"，等你去点亮
+  // 空白区：一个问题都没提过 —— 空心虚线，等你去点亮。
+  //
+  // ★ 这里踩过坑：曾用半透明深色填充（rgba(38,43,52,.55)）来表达"暗着"，
+  //   叠在 --graph-bg 上算出来只有 5% 亮度差，边框又只有 .16 —— 结果一门
+  //   还没提过问题的新课（覆盖率 0%）整张图集体隐形，看起来像加载失败。
+  //   空白必须"看得见地空"：靠边框而不是靠填充来表达未完成。
   {
     selector: 'node.overlay.blank',
     style: {
-      'background-color': 'rgba(38,43,52,0.55)',
+      'background-color': 'rgba(255,255,255,0.05)',
       'border-style': 'dashed',
-      'border-color': 'rgba(255,255,255,0.16)',
-      color: 'rgba(200,200,210,0.42)',
+      'border-width': 1.5,
+      'border-color': 'rgba(255,255,255,0.38)',
+      color: 'rgba(214,218,228,0.72)',
     },
   },
   {
@@ -497,6 +503,16 @@ export default function GraphPage() {
           ) : null}
           <div ref={boxRef} className="absolute inset-0" />
 
+          {/* 一门新课满屏虚线框时，得告诉用户这些框是干嘛的、怎么点亮 */}
+          {view === 'overlay' && overlay?.nodes.length && overlay.coverage === 0 ? (
+            <div className="absolute top-4 left-1/2 -translate-x-1/2 max-w-md px-4 text-center pointer-events-none">
+              <div className="text-[13px] text-white/70">这门课你还没提过任何问题</div>
+              <div className="text-[12px] text-white/40 mt-1 leading-relaxed">
+                每个虚线框是一个概念。去读一节、划词提问，对应的框就会亮起来。
+              </div>
+            </div>
+          ) : null}
+
           {/* 图例 */}
           <div className="absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1.5 text-[10.5px] text-white/45 max-w-[70%] pointer-events-none">
             {view === 'cards' ? (
@@ -509,7 +525,7 @@ export default function GraphPage() {
               </>
             ) : view === 'overlay' ? (
               <>
-                <Legend color="rgba(38,43,52,0.9)" label="空白" square dashed />
+                <Legend color="rgba(255,255,255,0.05)" label="空白" square dashed />
                 <Legend color="#44536b" label="提过问题" square />
                 <Legend color="#3d6d5a" label="有己见" square ring />
                 <span className="opacity-60">厚度 = 提过几个问题</span>
@@ -741,7 +757,7 @@ function Legend({
             border: ring
               ? '1.5px solid #7fd4aa'
               : dashed
-                ? '1px dashed rgba(255,255,255,0.3)'
+                ? '1px dashed rgba(255,255,255,0.55)'
                 : square
                   ? '1px solid rgba(140,180,255,0.4)'
                   : undefined,
