@@ -150,7 +150,8 @@ async def _llm_handler(_: Request, exc: LLMError):
     )
 
 
-@app.get("/api/health")
+# 带 HEAD：负载均衡器和监控探针常用 HEAD 做健康检查，收到 405/404 会误判为宕机
+@app.api_route("/api/health", methods=["GET", "HEAD"])
 async def health() -> dict:
     from app.llm.registry import available_providers
 
@@ -202,7 +203,9 @@ if settings.serve_frontend and (_dist := settings.dist_path):
 
     app.mount("/assets", StaticFiles(directory=_dist / "assets"), name="assets")
 
-    @app.get("/{full_path:path}", include_in_schema=False)
+    # 带上 HEAD：健康检查、CDN 预检、curl -I 都惯用 HEAD，
+    # 只注册 GET 会让它们收到 405，看起来像站点挂了
+    @app.api_route("/{full_path:path}", methods=["GET", "HEAD"], include_in_schema=False)
     async def spa(full_path: str):
         """SPA fallback：前端是 BrowserRouter，刷新任意深层路由都要回到 index.html。"""
         if full_path.startswith("api/"):
