@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 
@@ -51,10 +52,24 @@ def check_config() -> None:
     else:
         ok("JWT_SECRET 已设置", f"{len(s)} 字符")
 
-    if settings.is_prod and not settings.cookie_secure:
-        fail("COOKIE_SECURE=false", "HTTPS 下必须为 true，否则 cookie 明文传输")
+    # cookie_secure 的对错取决于站点到底跑没跑 HTTPS，不能一律要求 true。
+    # 明文 HTTP 下设成 true，浏览器根本不回传 cookie —— 表现为「登录成功后
+    # 立刻被踢回登录页」，比不加密更致命。所以这里按 PUBLIC_URL 分情况判。
+    _https = (settings.public_url or "").startswith("https://")
+    if settings.cookie_secure and not _https:
+        fail(
+            "COOKIE_SECURE=true 但站点不是 HTTPS",
+            "浏览器不会回传 Secure cookie，登录会直接失效。配好证书或先改回 false",
+        )
+    elif _https and not settings.cookie_secure:
+        fail("COOKIE_SECURE=false 但站点是 HTTPS", "cookie 明文传输，登录态可被劫持")
+    elif not _https:
+        warn(
+            "站点是明文 HTTP",
+            "登录态无法加密传输。配好 HTTPS 后，记得把 COOKIE_SECURE 一并改为 true",
+        )
     else:
-        ok(f"COOKIE_SECURE={settings.cookie_secure}")
+        ok("COOKIE_SECURE=true", "与 HTTPS 匹配")
 
     if settings.access_token_minutes > 60:
         warn(f"access token 有效期 {settings.access_token_minutes} 分钟", "偏长")
@@ -115,10 +130,25 @@ def check_config() -> None:
 
     section("4. 数据")
     if settings.is_sqlite:
-        path = settings.database_url.split("///")[-1]
+        # 显示解析后的绝对路径。写相对路径本身没问题（settings 会锚定到 backend/），
+        # 但只把 "./data/ladder.db" 打出来，没人知道文件实际落在哪
+        path = settings.resolved_database_url.split("///")[-1]
         ok("SQLite", f"{path} —— 单 worker 可用；多 worker 请切 PostgreSQL")
-        if settings.is_prod and "/app/data/" not in path and not path.startswith("/"):
-            warn("数据库路径是相对路径", "容器里务必挂到持久化卷，否则重建就没了")
+        db = Path(path)
+        if db.exists():
+            size = db.stat().st_size
+            wal = db.with_name(db.name + "-wal")
+            wal_size = wal.stat().st_size if wal.exists() else 0
+            ok("数据文件存在", f"主库 {size / 1024:.0f} KB · WAL {wal_size / 1024:.0f} KB")
+            # WAL 远大于主库 = 长时间没 checkpoint，主库其实是个空壳，
+            # 只备份 .db 会丢掉几乎所有数据
+            if wal_size > max(size, 65536) * 2:
+                warn(
+                    "WAL 明显大于主库",
+                    "数据大都还在 -wal 里；备份务必带上 -wal/-shm，或先执行 checkpoint",
+                )
+        else:
+            warn("数据文件尚未创建", "首次启动后才会生成")
     else:
         ok("PostgreSQL", "支持多 worker")
 
