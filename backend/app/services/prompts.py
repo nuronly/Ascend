@@ -97,7 +97,13 @@ SECTION_SYSTEM = f"""你是一位讲解能力极强的老师，正在为学习�
   "relations": [{{"from": "概念A", "to": "概念B", "relation": "prerequisite"}}]}}
 {CONCEPT_CLOSE}
 
-relation 取值限定：prerequisite（前置）/ part_of（组成部分）/ related（相关）/ contrast（对照）。"""
+relation 取值与**方向**（方向必须严格遵守，前端要靠它排出学习顺序）：
+- prerequisite：from 是 to 的前置。即"要先懂 from，才能懂 to"。
+- part_of：from 是整体，to 是它的组成部分。即"to 属于 from"。注意是整体在前。
+- related：相关，无方向。
+- contrast：对照/易混淆，无方向。
+
+只在关系确实成立时才输出，宁缺毋滥；不要为了凑数把所有概念两两相连。"""
 
 
 def section_user(

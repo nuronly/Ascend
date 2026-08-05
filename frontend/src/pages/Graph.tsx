@@ -8,23 +8,22 @@ import type { Card, CardGraphNode, CardLink, Course, OverlayData } from '@/lib/t
 import { RELATION_COLORS, RELATION_LABELS } from '@/lib/types'
 import { Badge, Button, Empty, Modal, Segmented, Spinner } from '@/components/ui'
 import { cn, relativeTime, truncate } from '@/lib/utils'
+import { type GraphView as View, runLayout } from '@/lib/graphLayout'
 
 /**
  * 双图谱（PLAN §3.4）
  *
- * 两张图人格不同：
- *   AI 概念图 —— "这个领域长什么样"（客观），只读为主
- *   卡片图    —— "我怎么想的"（主观、有时间性）
+ * 三个视图人格不同，这是它们各自唯一该回答的问题：
+ *   概念图 —— "这个领域长什么样、该按什么顺序学"（客观，不掺学习状态）
+ *   问题图 —— "我追问出来的思考轨迹"（主观、有时间性）
+ *   进度   —— "我啃到哪了、哪里还是空白"，空白区反向驱动学习
  *
- * ★ 叠加视图是杀手锏：AI 图做底图，卡片作为挂件钉在对应概念旁。
- *   一眼看到「这个领域我啃过哪几块、哪几块一片空白」，
- *   空白区反向驱动学习。
+ * 三者共用一套分层布局（见 lib/graphLayout），但骨架边不同 ——
+ * 布局的语义就是视图的语义。
  *
  * 画布刻意用深底 —— 图谱是"另一个空间"，视觉上应该与阅读区有奇异感，
  * 强化"我在俯瞰自己的认知地图"的仪式感（PLAN §4.3.5）。
  */
-
-type View = 'overlay' | 'concepts' | 'cards'
 
 const BASE_STYLE: cytoscape.StylesheetJson = [
   {
@@ -53,30 +52,46 @@ const BASE_STYLE: cytoscape.StylesheetJson = [
       shape: 'round-rectangle',
       'background-color': '#3a4150',
       width: 'data(size)' as any,
-      height: 18,
+      height: 'data(h)' as any,
       'text-valign': 'center',
       'text-margin-y': 0,
       'font-size': 10.5,
       padding: '6px' as any,
     },
   },
-  // 卡片密集区 = 困难区 = 复习优先区，用发光强度表达
+
+  // ── 叠加视图专属：概念节点自己就是进度条 ──────────────────
+  // concepts 视图不着色（它讲的是"领域客观长什么样"，跟我啃没啃过无关），
+  // 只有 overlay 才把学习状态叠上去 —— 两个视图的人格差异靠这个拉开。
+  //
+  //   厚度 = 提过几个问题（宽度留给标签，保证可读）
+  //   颜色 = 有没有己见（背过 ≠ 想过，只有己见才算真啃下来）
   {
-    selector: 'node.covered',
+    selector: 'node.overlay.covered',
     style: {
-      'background-color': '#4a5a78',
-      'border-color': 'rgba(140,180,255,0.5)',
+      'background-color': '#44536b',
+      'border-color': 'rgba(140,180,255,0.42)',
       'border-width': 1.5,
+    },
+  },
+  // 有己见：绿调点亮 —— 这块是真属于你的
+  {
+    selector: 'node.overlay.owned',
+    style: {
+      'background-color': '#3d6d5a',
+      'border-color': 'rgba(127,212,170,0.75)',
+      'border-width': 1.8,
+      color: 'rgba(240,255,248,0.95)',
     },
   },
   // 空白区：一个问题都没提过 —— 视觉上"暗着"，等你去点亮
   {
-    selector: 'node.blank',
+    selector: 'node.overlay.blank',
     style: {
-      'background-color': '#262b34',
+      'background-color': 'rgba(38,43,52,0.55)',
       'border-style': 'dashed',
       'border-color': 'rgba(255,255,255,0.16)',
-      color: 'rgba(200,200,210,0.45)',
+      color: 'rgba(200,200,210,0.42)',
     },
   },
   {
@@ -89,6 +104,16 @@ const BASE_STYLE: cytoscape.StylesheetJson = [
       'font-size': 9,
       color: 'rgba(215,220,230,0.75)',
       'text-valign': 'bottom',
+    },
+  },
+  // 根卡 = 最初那个疑问，一条追问链的源头，值得被看见
+  {
+    selector: 'node.root',
+    style: {
+      'border-width': 1.5,
+      'border-color': 'rgba(255,255,255,0.4)',
+      'font-size': 10,
+      color: 'rgba(235,238,245,0.92)',
     },
   },
   // 己见卡：实心亮色描边（与 AI 原生卡区分，PLAN §4.3.2）
@@ -117,24 +142,86 @@ const BASE_STYLE: cytoscape.StylesheetJson = [
       opacity: 0.75,
     },
   },
+  // ── 骨架边：决定层级，所以画成实线主干 ────────────────────
+  // 前置：学习路径本身
   {
     selector: 'edge.prerequisite',
     style: {
-      'line-color': 'rgba(150,180,255,0.3)',
+      'line-color': 'rgba(150,180,255,0.34)',
       'target-arrow-shape': 'triangle',
-      'target-arrow-color': 'rgba(150,180,255,0.35)',
-      'arrow-scale': 0.65,
+      'target-arrow-color': 'rgba(150,180,255,0.4)',
+      'arrow-scale': 0.7,
+      width: 1.3,
+      'curve-style': 'taxi',
+      'taxi-direction': 'downward' as any,
+      'taxi-turn': '50%' as any,
+      'taxi-turn-min-distance': 8 as any,
     },
   },
-  // 父子链：结构性
+  // 组成：整体 → 部分，比前置弱一档
+  {
+    selector: 'edge.part_of',
+    style: {
+      'line-color': 'rgba(255,255,255,0.2)',
+      'target-arrow-shape': 'chevron' as any,
+      'target-arrow-color': 'rgba(255,255,255,0.26)',
+      'arrow-scale': 0.6,
+      'curve-style': 'taxi',
+      'taxi-direction': 'downward' as any,
+      'taxi-turn': '50%' as any,
+    },
+  },
+  // ── 非骨架边：不参与分层，退到背景当"横向提示" ──────────────
+  {
+    selector: 'edge.related',
+    style: {
+      'line-color': 'rgba(160,170,190,0.26)',
+      'line-style': 'dashed',
+      'curve-style': 'unbundled-bezier',
+      'control-point-distance': 34 as any,
+      'control-point-weight': 0.5 as any,
+      opacity: 0.55,
+    },
+  },
+  // 对照：易混淆，用紫红提醒"这两个别搞混"
+  {
+    selector: 'edge.contrast',
+    style: {
+      'line-color': 'rgba(198,138,186,0.4)',
+      'line-style': 'dotted',
+      width: 1.4,
+      'curve-style': 'unbundled-bezier',
+      'control-point-distance': 40 as any,
+      'control-point-weight': 0.5 as any,
+    },
+  },
+  // 追问链：结构性主干，箭头指向"往下追的那一层"
   {
     selector: 'edge.parent',
-    style: { 'line-color': 'rgba(255,255,255,0.2)', width: 1.2 },
+    style: {
+      'line-color': 'rgba(255,255,255,0.22)',
+      width: 1.2,
+      'target-arrow-shape': 'triangle',
+      'target-arrow-color': 'rgba(255,255,255,0.26)',
+      'arrow-scale': 0.6,
+      'curve-style': 'taxi',
+      'taxi-direction': 'rightward' as any,
+      'taxi-turn': '46%' as any,
+      'taxi-turn-min-distance': 8 as any,
+    },
   },
-  // real link：暖调琥珀（借 Folium）
+  // ★ real link：跨追问链的意外关联 —— 整个第二大脑最值钱的东西。
+  //   用琥珀色 + 大弧线让它明显"飞越"树结构，而不是混进主干。
   {
     selector: 'edge.real',
-    style: { 'line-color': '#d69a4a', width: 1.8, opacity: 0.95 },
+    style: {
+      'line-color': '#d69a4a',
+      width: 1.8,
+      opacity: 0.95,
+      'curve-style': 'unbundled-bezier',
+      'control-point-distance': 70 as any,
+      'control-point-weight': 0.5 as any,
+    },
   },
   // potential：冷灰虚线，"是问题，不是事实"
   {
@@ -144,19 +231,14 @@ const BASE_STYLE: cytoscape.StylesheetJson = [
       'line-style': 'dashed',
       width: 1,
       opacity: 0.5,
-    },
-  },
-  // 挂件连线：卡片钉在概念旁
-  {
-    selector: 'edge.attach',
-    style: {
-      'line-color': 'rgba(140,180,255,0.22)',
-      'line-style': 'dotted',
-      width: 1,
+      'curve-style': 'unbundled-bezier',
+      'control-point-distance': 55 as any,
+      'control-point-weight': 0.5 as any,
     },
   },
   { selector: '.dimmed', style: { opacity: 0.16 } },
 ]
+
 
 export default function GraphPage() {
   const { courseId } = useParams()
@@ -205,7 +287,7 @@ export default function GraphPage() {
             size: 16 + Math.min(n.touch_count, 8) * 1.6 - n.depth * 1.2,
             kind: 'card',
           },
-          classes: cn('card', n.is_rewritten && 'rewritten'),
+          classes: cn('card', n.is_rewritten && 'rewritten', n.depth === 0 && 'root'),
         })
       }
       const ids = new Set(cardGraph.nodes.map((n) => n.id))
@@ -230,17 +312,26 @@ export default function GraphPage() {
 
     if (!overlay) return els
 
+    const isOverlay = view === 'overlay'
     for (const n of overlay.nodes) {
-      const covered = n.card_count > 0
+      // 叠加视图：把「提过几个问题」写进标签，省得还要点开才知道
+      const label = truncate(n.label, 14) + (isOverlay && n.card_count ? `  ${n.card_count}` : '')
       els.push({
         data: {
           id: n.id,
-          label: truncate(n.label, 14),
-          size: Math.max(60, Math.min(160, n.label.length * 11 + 20)),
+          label,
+          size: Math.max(60, Math.min(170, label.length * 11 + 22)),
+          // 厚度 = 卡片数。宽度让给标签，保证任何时候都读得出概念名
+          h: isOverlay ? 18 + Math.min(n.card_count, 6) * 2.4 : 18,
           kind: 'concept',
           count: n.card_count,
         },
-        classes: cn('concept', covered ? 'covered' : 'blank'),
+        classes: cn(
+          'concept',
+          isOverlay && 'overlay',
+          isOverlay &&
+            (n.rewritten_count > 0 ? 'owned' : n.card_count > 0 ? 'covered' : 'blank'),
+        ),
       })
     }
     for (const e of overlay.edges) {
@@ -248,23 +339,6 @@ export default function GraphPage() {
         data: { id: e.id, source: e.from, target: e.to },
         classes: e.relation,
       })
-    }
-
-    // ★ 叠加：把卡片作为挂件钉在概念节点旁
-    if (view === 'overlay') {
-      for (const [conceptId, list] of Object.entries(overlay.attachments)) {
-        for (const a of list) {
-          const nid = `card:${a.card_id}:${conceptId}`
-          els.push({
-            data: { id: nid, label: truncate(a.label || '', 12), size: 11, kind: 'card', cardId: a.card_id },
-            classes: cn('card', a.is_rewritten && 'rewritten'),
-          })
-          els.push({
-            data: { id: `at-${nid}`, source: conceptId, target: nid },
-            classes: 'attach',
-          })
-        }
-      }
     }
     return els
   }, [view, overlay, cardGraph])
@@ -278,21 +352,13 @@ export default function GraphPage() {
       container: boxRef.current,
       elements,
       style: BASE_STYLE,
-      layout: {
-        name: 'cose',
-        animate: false,
-        nodeRepulsion: () => 12000,
-        idealEdgeLength: () => 70,
-        nodeOverlap: 14,
-        gravity: 0.5,
-        numIter: 900,
-        padding: 40,
-      } as any,
+      layout: { name: 'preset' }, // 真正的布局在下面按视图分派
       minZoom: 0.2,
       maxZoom: 2.5,
       wheelSensitivity: 0.22,
     })
     cyRef.current = cy
+    runLayout(cy, view)
 
     cy.on('tap', 'node', (e) => {
       const n = e.target
@@ -325,7 +391,7 @@ export default function GraphPage() {
       cy.destroy()
       cyRef.current = null
     }
-  }, [elements])
+  }, [elements, view])
 
   const reinforce = async (concept: string) => {
     if (!activeCourse) return
@@ -346,6 +412,7 @@ export default function GraphPage() {
   const loading = view === 'cards' ? loadingCards : loadingOverlay
   const selectedConcept =
     selected?.type === 'concept' ? overlay?.nodes.find((n) => n.id === selected.id) : null
+  const conceptCards = (selectedConcept && overlay?.attachments[selectedConcept.id]) || []
 
   return (
     <div className="h-full flex flex-col">
@@ -357,9 +424,9 @@ export default function GraphPage() {
           value={view}
           onChange={setView}
           options={[
-            { value: 'overlay', label: '叠加', title: 'AI 概念图 + 我的卡片挂件' },
-            { value: 'concepts', label: '概念图', title: '这个领域长什么样（客观）' },
-            { value: 'cards', label: '问题图', title: '我怎么想的（主观）' },
+            { value: 'overlay', label: '进度', title: '这个领域我啃到哪了、哪里还是空白' },
+            { value: 'concepts', label: '概念图', title: '这个领域长什么样、该按什么顺序学（客观）' },
+            { value: 'cards', label: '问题图', title: '我追问出来的思考轨迹（主观）' },
           ]}
         />
 
@@ -379,14 +446,28 @@ export default function GraphPage() {
 
         <div className="grow" />
 
-        {view !== 'cards' && overlay && (
-          <span className="text-[12px] text-[var(--text-muted)]">
-            覆盖率{' '}
-            <b className="tabular-nums text-[var(--text)]">
-              {Math.round(overlay.coverage * 100)}%
-            </b>
-            <span className="mx-1.5 opacity-40">·</span>
-            {overlay.blank_spots.length} 块空白
+        {/* 覆盖度只属于叠加视图 —— 概念图讲的是领域客观长什么样，与我啃没啃过无关 */}
+        {view === 'overlay' && overlay && (
+          <span className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
+            <span
+              className="w-20 h-1 rounded-full overflow-hidden bg-[var(--bg-raised)] shrink-0"
+              title={`${overlay.nodes.length - overlay.blank_spots.length} / ${overlay.nodes.length} 个概念提过问题`}
+            >
+              <span
+                className="block h-full rounded-full transition-[width] duration-500"
+                style={{
+                  width: `${Math.round(overlay.coverage * 100)}%`,
+                  background: 'var(--sem-rewritten, #4e8f72)',
+                }}
+              />
+            </span>
+            <span>
+              <b className="tabular-nums text-[var(--text)]">
+                {Math.round(overlay.coverage * 100)}%
+              </b>
+              <span className="mx-1.5 opacity-40">·</span>
+              {overlay.blank_spots.length} 块空白
+            </span>
           </span>
         )}
 
@@ -420,16 +501,26 @@ export default function GraphPage() {
           <div className="absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1.5 text-[10.5px] text-white/45 max-w-[70%] pointer-events-none">
             {view === 'cards' ? (
               <>
-                <Legend color="#5b6b8a" label="AI 原生卡" />
                 <Legend color="#4e8f72" label="己见卡" ring />
+                <Legend line="rgba(255,255,255,0.4)" label="追问链" />
                 <Legend line="#d69a4a" label="正式关联" />
-                <Legend line="rgba(160,165,180,0.6)" label="可能关联" dashed />
+                <Legend line="rgba(160,165,180,0.6)" label="可能关联" lineStyle="dashed" />
+                <span className="opacity-60">左→右 = 追问的深度</span>
+              </>
+            ) : view === 'overlay' ? (
+              <>
+                <Legend color="rgba(38,43,52,0.9)" label="空白" square dashed />
+                <Legend color="#44536b" label="提过问题" square />
+                <Legend color="#3d6d5a" label="有己见" square ring />
+                <span className="opacity-60">厚度 = 提过几个问题</span>
               </>
             ) : (
               <>
-                <Legend color="#4a5a78" label="啃过的概念" square />
-                <Legend color="#262b34" label="空白区" square dashed />
-                {view === 'overlay' && <Legend color="#5b6b8a" label="我的卡片" />}
+                <Legend line="rgba(150,180,255,0.55)" label="前置" />
+                <Legend line="rgba(255,255,255,0.4)" label="组成" />
+                <Legend line="rgba(160,170,190,0.5)" label="相关" lineStyle="dashed" />
+                <Legend line="rgba(198,138,186,0.7)" label="对照" lineStyle="dotted" />
+                <span className="opacity-60">上→下 = 学习顺序</span>
               </>
             )}
           </div>
@@ -445,30 +536,74 @@ export default function GraphPage() {
                   {selectedConcept.description}
                 </p>
               )}
-              <div className="flex gap-1.5 mt-3">
-                <Badge tone={selectedConcept.card_count ? 'accent' : 'neutral'}>
-                  {selectedConcept.card_count} 张卡
-                </Badge>
-                {selectedConcept.rewritten_count > 0 && (
-                  <Badge tone="rewritten">{selectedConcept.rewritten_count} 己见</Badge>
-                )}
-              </div>
+              {/* 学习状态只在叠加视图出现，概念图保持"客观地图"的人格 */}
+              {view === 'overlay' && (
+                <>
+                  <div className="flex gap-1.5 mt-3">
+                    <Badge tone={selectedConcept.card_count ? 'accent' : 'neutral'}>
+                      {selectedConcept.card_count} 张卡
+                    </Badge>
+                    {selectedConcept.rewritten_count > 0 && (
+                      <Badge tone="rewritten">{selectedConcept.rewritten_count} 己见</Badge>
+                    )}
+                  </div>
 
-              {selectedConcept.card_count === 0 && (
-                <div className="mt-4 p-3 border border-dashed border-[var(--border-strong)] rounded-[var(--radius)]">
-                  <p className="text-[12px] text-[var(--text-muted)] leading-relaxed">
-                    你在这块周边一个问题都没提过。可能是真的懂，也可能是盲区。
-                  </p>
-                  <Button
-                    size="xs"
-                    variant="primary"
-                    className="mt-2.5 w-full"
-                    loading={reinforcing === selectedConcept.label}
-                    onClick={() => reinforce(selectedConcept.label)}
-                  >
-                    生成强化课
-                  </Button>
-                </div>
+                  {/* 卡片不再挤进画布当节点，改在这里下钻 —— 画布只管结构，侧栏只管细节 */}
+                  {!!conceptCards.length && (
+                    <div className="mt-3.5">
+                      <div className="text-[11px] text-[var(--text-subtle)] mb-1.5">
+                        我在这块提过的问题
+                      </div>
+                      <div className="space-y-1">
+                        {conceptCards.map((a) => (
+                          <button
+                            key={a.card_id}
+                            onClick={() =>
+                              api
+                                .get<Card>(`/cards/${a.card_id}`)
+                                .then(setCardDetail)
+                                .catch(() => toast.error('卡片读取失败'))
+                            }
+                            className={cn(
+                              'w-full flex items-start gap-2 px-2 py-1.5 text-left text-[12.5px] rounded-[var(--radius-sm)]',
+                              'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)] transition-colors',
+                            )}
+                          >
+                            <span
+                              className={cn(
+                                'mt-[5px] size-1.5 rounded-full shrink-0',
+                                a.is_rewritten
+                                  ? 'bg-[var(--sem-rewritten,#4e8f72)]'
+                                  : 'bg-[var(--text-subtle)]',
+                              )}
+                              title={a.is_rewritten ? '已写己见' : 'AI 原生'}
+                            />
+                            <span className="min-w-0 line-clamp-2 leading-snug">
+                              {a.label || '未命名'}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {selectedConcept.card_count === 0 && (
+                    <div className="mt-4 p-3 border border-dashed border-[var(--border-strong)] rounded-[var(--radius)]">
+                      <p className="text-[12px] text-[var(--text-muted)] leading-relaxed">
+                        你在这块周边一个问题都没提过。可能是真的懂，也可能是盲区。
+                      </p>
+                      <Button
+                        size="xs"
+                        variant="primary"
+                        className="mt-2.5 w-full"
+                        loading={reinforcing === selectedConcept.label}
+                        onClick={() => reinforce(selectedConcept.label)}
+                      >
+                        生成强化课
+                      </Button>
+                    </div>
+                  )}
+                </>
               )}
 
               {selectedConcept.section_id && (
@@ -486,7 +621,7 @@ export default function GraphPage() {
                 </Button>
               )}
             </div>
-          ) : view !== 'cards' && overlay?.blank_spots.length ? (
+          ) : view === 'overlay' && overlay?.blank_spots.length ? (
             <div className="p-4">
               <div className="text-[13px] font-semibold">空白区</div>
               <p className="text-[12px] text-[var(--text-muted)] mt-1.5 leading-relaxed">
@@ -520,7 +655,9 @@ export default function GraphPage() {
                 hint={
                   view === 'cards'
                     ? '双击卡片节点可以看到完整内容。'
-                    : '看看这个概念你提过几个问题。'
+                    : view === 'overlay'
+                      ? '点概念看你在这块提过哪些问题。'
+                      : '这张图只讲领域客观长什么样，不掺你的学习状态。'
                 }
               />
             </div>
@@ -577,6 +714,7 @@ function Legend({
   ring,
   square,
   dashed,
+  lineStyle = 'solid',
 }: {
   color?: string
   line?: string
@@ -584,6 +722,7 @@ function Legend({
   ring?: boolean
   square?: boolean
   dashed?: boolean
+  lineStyle?: 'solid' | 'dashed' | 'dotted'
 }) {
   return (
     <span className="flex items-center gap-1.5">
@@ -591,7 +730,7 @@ function Legend({
         <span
           className="w-4 h-0 shrink-0"
           style={{
-            borderTop: `${dashed ? '1.5px dashed' : '2px solid'} ${line}`,
+            borderTop: `${lineStyle === 'solid' ? '2px' : '1.5px'} ${lineStyle} ${line}`,
           }}
         />
       ) : (
@@ -603,7 +742,9 @@ function Legend({
               ? '1.5px solid #7fd4aa'
               : dashed
                 ? '1px dashed rgba(255,255,255,0.3)'
-                : undefined,
+                : square
+                  ? '1px solid rgba(140,180,255,0.4)'
+                  : undefined,
           }}
         />
       )}
