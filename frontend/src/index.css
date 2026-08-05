@@ -85,12 +85,15 @@
   --shadow-float: 0 1px 2px oklch(0% 0 0 / 0.04), 0 4px 12px oklch(0% 0 0 / 0.06);
   --shadow-pop: 0 2px 4px oklch(0% 0 0 / 0.05), 0 12px 32px oklch(0% 0 0 / 0.1);
 
-  /* 图谱是"另一个空间"，即使浅色模式下也是深底 —— 故意的，
-     强化"我在俯瞰自己的认知地图"的仪式感（§4.3.5） */
-  --graph-bg: oklch(17% 0.008 265);
-  --graph-grid: oklch(24% 0.008 265);
-  --graph-node: oklch(30% 0.01 265);
-  --graph-text: oklch(88% 0.003 265);
+  /* 图谱曾经刻意做成深底（§4.3.5 的"另一个空间"）。
+     实际用下来，深底反而让淡色节点难以分辨、和产品其余部分割裂，
+     现在改为与阅读区一致的浅底，靠"彩色球 + 悬停卡片"来建立空间感。
+     ⚠️ 这几个变量只作用于画布容器等 DOM 元素；
+        cytoscape 走 Canvas 渲染，解析不了 var()，节点配色见 graphTheme.ts */
+  --graph-bg: oklch(98.2% 0.003 250);
+  --graph-grid: oklch(94% 0.005 250);
+  --graph-node: oklch(86% 0.045 250);
+  --graph-text: oklch(37% 0.012 265);
 
   color-scheme: light;
 }

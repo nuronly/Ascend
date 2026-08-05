@@ -260,9 +260,60 @@ export class NeuralLayout {
   }
 }
 
-/* ── 配色（图谱是"另一个空间"，恒定深底，PLAN §4.3.5）── */
-export const PALETTE = {
+/* ── 配色 ────────────────────────────────────────────────────
+ * 记忆网络原本恒定深底（PLAN §4.3.5 的"另一个空间"），后来改为跟随主题。
+ *
+ * ⚠️ 两套配色不是简单地把颜色取反 —— 深浅底的视觉语言根本不同：
+ *      深底：靠「发光」表达记忆强度，弱记忆自己暗下去
+ *      浅底：不能发光，改靠「饱和度」，弱记忆淡到接近背景
+ *    所以激活色在深底是提亮（近白），在浅底必须是压深（深蓝紫），
+ *    否则激活的瞬间节点会直接消失在白底里。
+ */
+export interface Palette {
+  bg: string
+  /** 拖尾用的半透明背景色，让信号有余晖 */
+  trail: string
+  edge: string
+  edgeParent: string
+  edgeReal: string
+  edgePotential: string
+  node: string
+  nodeRewritten: string
+  nodeDue: string
+  nodeIsolated: string
+  actFulltext: string
+  actVector: string
+  actGraph: string
+  actPicked: string
+  /** 光晕强度系数：白底上柔和扩散，深底上可以更张扬 */
+  haloScale: number
+  /** 行进信号的 shadowBlur。白底上发光只会糊成一团灰，必须关掉 */
+  glow: number
+}
+
+export const LIGHT_PALETTE: Palette = {
+  bg: '#f7f9fc',
+  trail: 'rgba(247, 249, 252, 0.32)',
+  edge: 'rgba(100, 116, 139, 0.12)',
+  edgeParent: 'rgba(100, 116, 139, 0.30)',
+  edgeReal: 'rgba(217, 119, 6, 0.55)',
+  edgePotential: 'rgba(100, 116, 139, 0.18)',
+  node: '#7ba3d8',
+  nodeRewritten: '#2fa37a',
+  nodeDue: '#e0883a',
+  // 孤岛卡在白底上"淡到几乎看不见"，与深底上"几乎熄灭"是同一个意思
+  nodeIsolated: '#d3d9e2',
+  actFulltext: '#1e3a8a',
+  actVector: '#2563eb',
+  actGraph: '#7c3aed',
+  actPicked: '#c2410c',
+  haloScale: 0.55,
+  glow: 0,
+}
+
+export const DARK_PALETTE: Palette = {
   bg: '#0b0e14',
+  trail: 'rgba(11, 14, 20, 0.32)',
   edge: 'rgba(148, 163, 200, 0.10)',
   edgeParent: 'rgba(148, 163, 200, 0.20)',
   edgeReal: 'rgba(214, 154, 74, 0.55)',
@@ -275,28 +326,28 @@ export const PALETTE = {
   actVector: '#6fa8ff',
   actGraph: '#a78bfa',
   actPicked: '#ffd28a',
-  text: 'rgba(226, 232, 245, 0.92)',
-  textDim: 'rgba(226, 232, 245, 0.42)',
+  haloScale: 1,
+  glow: 10,
 }
 
-export function neuronColor(b: Body): string {
-  if (b.isolated) return PALETTE.nodeIsolated
-  if (b.due) return PALETTE.nodeDue
-  if (b.rewritten) return PALETTE.nodeRewritten
-  return PALETTE.node
+export function neuronColor(b: Body, p: Palette): string {
+  if (b.isolated) return p.nodeIsolated
+  if (b.due) return p.nodeDue
+  if (b.rewritten) return p.nodeRewritten
+  return p.node
 }
 
-export function activationColor(kind: Body['actKind']): string {
+export function activationColor(kind: Body['actKind'], p: Palette): string {
   switch (kind) {
     case 'fulltext':
-      return PALETTE.actFulltext
+      return p.actFulltext
     case 'vector':
-      return PALETTE.actVector
+      return p.actVector
     case 'graph':
-      return PALETTE.actGraph
+      return p.actGraph
     case 'picked':
-      return PALETTE.actPicked
+      return p.actPicked
     default:
-      return PALETTE.actFulltext
+      return p.actFulltext
   }
 }

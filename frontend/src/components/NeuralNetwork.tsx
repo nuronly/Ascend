@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useImperativeHandle, useRef, useState, forwardRef } from 'react'
 import {
+  DARK_PALETTE,
+  LIGHT_PALETTE,
   NeuralLayout,
-  PALETTE,
   activationColor,
   neuronColor,
   type Body,
   type NetworkData,
+  type Palette,
 } from '@/lib/neural'
+import { useIsDark } from '@/lib/useTheme'
 import { cn } from '@/lib/utils'
 
 /**
@@ -54,6 +57,14 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
   const hoverRef = useRef<Body | null>(null)
   const timelineRef = useRef(timeline)
   const [hovered, setHovered] = useState<Body | null>(null)
+
+  // draw 是每帧跑的 useCallback([])，配色只能through ref 递进去
+  const dark = useIsDark()
+  const pal = dark ? DARK_PALETTE : LIGHT_PALETTE
+  const palRef = useRef<Palette>(pal)
+  useEffect(() => {
+    palRef.current = pal
+  }, [pal])
 
   useEffect(() => {
     timelineRef.current = timeline
@@ -136,6 +147,7 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
 
     const ctx = canvas.getContext('2d')
     if (!ctx) return
+    const P = palRef.current
     const now = performance.now()
     const dt = Math.min((now - lastRef.current) / 1000, 0.05)
     lastRef.current = now
@@ -146,7 +158,7 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
     // 轻微拖尾：让信号有余晖，画面更"活"
-    ctx.fillStyle = 'rgba(11, 14, 20, 0.32)'
+    ctx.fillStyle = P.trail
     ctx.fillRect(0, 0, w, h)
 
     const v = viewRef.current
@@ -177,16 +189,12 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
       ctx.lineTo(e.b.x, e.b.y)
       if (lit > 0.05) {
         // 两端有激活时，连线跟着亮起来 —— 表现"信号通路"
-        ctx.strokeStyle = activationColor(e.a.act > e.b.act ? e.a.actKind : e.b.actKind)
+        ctx.strokeStyle = activationColor(e.a.act > e.b.act ? e.a.actKind : e.b.actKind, P)
         ctx.globalAlpha = lit * 0.5
         ctx.lineWidth = 0.8 + lit * 1.4
       } else {
         ctx.strokeStyle =
-          e.kind === 'real'
-            ? PALETTE.edgeReal
-            : e.kind === 'parent'
-              ? PALETTE.edgeParent
-              : PALETTE.edgePotential
+          e.kind === 'real' ? P.edgeReal : e.kind === 'parent' ? P.edgeParent : P.edgePotential
         ctx.globalAlpha = 1
         ctx.lineWidth = e.kind === 'parent' ? 0.9 : e.kind === 'real' ? 1.1 : 0.7
         if (e.kind === 'potential') ctx.setLineDash([3, 4])
@@ -202,12 +210,12 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
       const x = s.ax + (s.bx - s.ax) * t
       const y = s.ay + (s.by - s.ay) * t
       const fade = Math.sin(t * Math.PI)
-      const color = s.kind === 'picked' ? PALETTE.actPicked : PALETTE.actGraph
+      const color = s.kind === 'picked' ? P.actPicked : P.actGraph
       ctx.beginPath()
-      ctx.arc(x, y, 1.8, 0, Math.PI * 2)
+      ctx.arc(x, y, P.glow ? 1.8 : 2.2, 0, Math.PI * 2)
       ctx.fillStyle = color
       ctx.globalAlpha = fade
-      ctx.shadowBlur = 10
+      ctx.shadowBlur = P.glow
       ctx.shadowColor = color
       ctx.fill()
       ctx.shadowBlur = 0
@@ -217,23 +225,24 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
     /* ── 神经元 ── */
     for (const b of layout.bodies) {
       if (!visible(b)) continue
-      const base = neuronColor(b)
+      const base = neuronColor(b, P)
       const grow = b.born
-      // 亮度 = 记忆强度。孤岛卡压到很暗 —— 看得见的遗忘
-      const lum = b.isolated ? 0.14 : 0.3 + b.strength * 0.7
+      // 不透明度 = 记忆强度。孤岛卡压到极淡 —— 看得见的遗忘。
+      // 深底上表现为"暗下去"，浅底上表现为"淡进背景"，是同一件事
+      const lum = b.isolated ? 0.22 : 0.3 + b.strength * 0.7
       const r = b.r * grow
 
       // 到期待复习的节点在呼吸
       const breathe = b.due ? 1 + Math.sin(now / 480 + b.x) * 0.14 : 1
 
       if (b.act > 0.02) {
-        const ac = activationColor(b.actKind)
+        const ac = activationColor(b.actKind, P)
         const halo = r * (3.4 + b.act * 3.6)
         const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, halo)
         g.addColorStop(0, ac)
         g.addColorStop(0.28, ac)
         g.addColorStop(1, 'transparent')
-        ctx.globalAlpha = b.act * 0.42
+        ctx.globalAlpha = b.act * 0.42 * P.haloScale
         ctx.beginPath()
         ctx.arc(b.x, b.y, halo, 0, Math.PI * 2)
         ctx.fillStyle = g
@@ -245,7 +254,7 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
         const g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, halo)
         g.addColorStop(0, base)
         g.addColorStop(1, 'transparent')
-        ctx.globalAlpha = 0.09 + b.strength * 0.2
+        ctx.globalAlpha = (0.09 + b.strength * 0.2) * P.haloScale
         ctx.beginPath()
         ctx.arc(b.x, b.y, halo, 0, Math.PI * 2)
         ctx.fillStyle = g
@@ -255,7 +264,7 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
 
       ctx.beginPath()
       ctx.arc(b.x, b.y, r * breathe, 0, Math.PI * 2)
-      ctx.fillStyle = b.act > 0.02 ? activationColor(b.actKind) : base
+      ctx.fillStyle = b.act > 0.02 ? activationColor(b.actKind, P) : base
       ctx.globalAlpha = b.act > 0.02 ? 1 : lum
       ctx.fill()
       ctx.globalAlpha = 1
@@ -264,7 +273,7 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
       if (b.rewritten && !b.isolated) {
         ctx.beginPath()
         ctx.arc(b.x, b.y, r * breathe + 1.6, 0, Math.PI * 2)
-        ctx.strokeStyle = PALETTE.nodeRewritten
+        ctx.strokeStyle = P.nodeRewritten
         ctx.globalAlpha = 0.5 + b.act * 0.5
         ctx.lineWidth = 1
         ctx.stroke()
@@ -277,7 +286,7 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
     if (hv && visible(hv)) {
       ctx.beginPath()
       ctx.arc(hv.x, hv.y, hv.r + 5, 0, Math.PI * 2)
-      ctx.strokeStyle = PALETTE.actFulltext
+      ctx.strokeStyle = P.actVector
       ctx.lineWidth = 1.2
       ctx.globalAlpha = 0.8
       ctx.stroke()
@@ -288,7 +297,7 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
         ctx.beginPath()
         ctx.moveTo(e.a.x, e.a.y)
         ctx.lineTo(e.b.x, e.b.y)
-        ctx.strokeStyle = PALETTE.actFulltext
+        ctx.strokeStyle = P.actVector
         ctx.globalAlpha = 0.34
         ctx.lineWidth = 1.1
         ctx.stroke()
@@ -387,12 +396,12 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
     <div
       ref={wrapRef}
       className={cn('relative overflow-hidden select-none', className)}
-      style={{ background: PALETTE.bg, cursor: 'grab' }}
+      style={{ background: pal.bg, cursor: 'grab' }}
     >
       <canvas ref={canvasRef} className="block" />
 
       {loading && (
-        <div className="absolute inset-0 flex items-center justify-center text-[13px] text-white/45">
+        <div className="absolute inset-0 flex items-center justify-center text-[13px] text-[var(--text-muted)]">
           正在读取记忆网络…
         </div>
       )}
@@ -400,8 +409,8 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
       {!loading && data && !data.neurons.length && (
         <div className="absolute inset-0 flex items-center justify-center px-8">
           <div className="text-center max-w-sm">
-            <div className="text-[14px] font-medium text-white/85">网络还是空的</div>
-            <div className="text-[12.5px] text-white/45 mt-2 leading-relaxed">
+            <div className="text-[14px] font-medium text-[var(--text)]">网络还是空的</div>
+            <div className="text-[12.5px] text-[var(--text-muted)] mt-2 leading-relaxed">
               每收进仓库一张卡，这里就会多一个神经元。
               等你积累起几十张，它们之间的连接会自己显形。
             </div>
@@ -411,25 +420,30 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
 
       {/* hover 卡片浮层 */}
       {hovered && (
-        <div className="absolute left-3 bottom-3 max-w-[300px] px-3 py-2 rounded-[var(--radius)] bg-black/70 backdrop-blur-sm border border-white/10 pointer-events-none">
+        <div
+          className="absolute left-3 bottom-3 max-w-[300px] px-3 py-2 rounded-[var(--radius)] bg-[var(--bg-raised)] border border-[var(--border)] pointer-events-none"
+          style={{ boxShadow: 'var(--shadow-float)' }}
+        >
           <div className="flex items-center gap-1.5">
-            <span className="font-mono text-[9.5px] text-white/40">{hovered.luhmann_id}</span>
-            <span className="text-[12px] font-medium text-white/90 truncate">
+            <span className="font-mono text-[9.5px] text-[var(--text-subtle)]">
+              {hovered.luhmann_id}
+            </span>
+            <span className="text-[12px] font-medium text-[var(--text)] truncate">
               ⟨{hovered.term || hovered.label}⟩
             </span>
           </div>
           {hovered.label && hovered.label !== hovered.term && (
-            <div className="text-[11.5px] text-white/55 mt-1 leading-relaxed line-clamp-2">
+            <div className="text-[11.5px] text-[var(--text-muted)] mt-1 leading-relaxed line-clamp-2">
               {hovered.label}
             </div>
           )}
-          <div className="flex flex-wrap gap-x-2.5 gap-y-0.5 mt-1.5 text-[10px] text-white/40">
+          <div className="flex flex-wrap gap-x-2.5 gap-y-0.5 mt-1.5 text-[10px] text-[var(--text-subtle)]">
             <span>记忆强度 {Math.round(hovered.strength * 100)}%</span>
             <span>连接 {hovered.degree}</span>
             <span>回想 {hovered.touch} 次</span>
-            {hovered.rewritten && <span className="text-[#7fd4aa]">己见</span>}
-            {hovered.due && <span className="text-[#f0a860]">待复习</span>}
-            {hovered.isolated && <span className="text-white/30">孤岛</span>}
+            {hovered.rewritten && <span className="text-[var(--sem-rewritten)]">己见</span>}
+            {hovered.due && <span className="text-[var(--sem-due)]">待复习</span>}
+            {hovered.isolated && <span className="opacity-70">孤岛</span>}
           </div>
         </div>
       )}

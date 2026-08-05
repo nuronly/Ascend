@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, sse } from '@/lib/api'
 import type { Card, Citation } from '@/lib/types'
-import type { NetworkData } from '@/lib/neural'
+import { DARK_PALETTE, LIGHT_PALETTE, type NetworkData } from '@/lib/neural'
+import { useIsDark } from '@/lib/useTheme'
 import { Markdown } from '@/components/Markdown'
 import { NeuralNetwork, type NeuralHandle } from '@/components/NeuralNetwork'
 import { Badge, Button, Modal, Segmented, Spinner, Textarea } from '@/components/ui'
@@ -33,8 +34,16 @@ const RECALL_LABEL: Record<string, { text: string; color: string }> = {
   fused: { text: '融合排序', color: '#c9d4ea' },
 }
 
+/** 画布上的浮层。之前写死成黑色药丸，浅底下像贴了块补丁 */
+const FLOAT = cn(
+  'absolute px-2.5 py-1.5 rounded-full',
+  'bg-[color-mix(in_oklch,var(--bg-raised)_88%,transparent)] backdrop-blur-sm',
+  'border border-[var(--border)]',
+)
+
 export default function BrainPage() {
   const nav = useNavigate()
+  const pal = useIsDark() ? DARK_PALETTE : LIGHT_PALETTE
   const [turns, setTurns] = useState<Turn[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -254,40 +263,45 @@ export default function BrainPage() {
 
             {/* 检索阶段指示 */}
             {stage && (
-              <div className="absolute top-3 left-3 flex items-center gap-2 px-2.5 py-1.5 rounded-full bg-black/60 backdrop-blur-sm border border-white/10 animate-fade-in">
+              <div className={cn(FLOAT, 'top-3 left-3 flex items-center gap-2 animate-fade-in')}>
                 <span
                   className="size-1.5 rounded-full animate-pulse"
-                  style={{ background: RECALL_LABEL[stage.key]?.color ?? '#fff' }}
+                  style={{ background: RECALL_LABEL[stage.key]?.color ?? 'currentColor' }}
                 />
-                <span className="text-[11.5px] text-white/85">
+                <span className="text-[11.5px] text-[var(--text)]">
                   {RECALL_LABEL[stage.key]?.text ?? stage.key}
                 </span>
-                <span className="text-[11px] text-white/45 tabular-nums">{stage.count}</span>
+                <span className="text-[11px] text-[var(--text-subtle)] tabular-nums">
+                  {stage.count}
+                </span>
               </div>
             )}
 
-            {/* 图例 */}
-            <div className="absolute top-3 right-3 flex flex-col gap-1 text-[10px] text-white/40 pointer-events-none">
+            {/* 图例。颜色必须取自当前调色板，否则切主题后图例和画面对不上 */}
+            <div className="absolute top-3 right-3 flex flex-col gap-1 text-[10px] text-[var(--text-subtle)] pointer-events-none">
               {[
-                ['#3f8f70', '己见卡'],
-                ['#c8813c', '待复习'],
-                ['#4a5875', 'AI 原生'],
-                ['#242a36', '孤岛（濒临遗忘）'],
+                [pal.nodeRewritten, '己见卡'],
+                [pal.nodeDue, '待复习'],
+                [pal.node, 'AI 原生'],
+                [pal.nodeIsolated, '孤岛（濒临遗忘）'],
               ].map(([c, t]) => (
                 <span key={t} className="flex items-center gap-1.5 justify-end">
                   {t}
-                  <span className="size-2 rounded-full" style={{ background: c }} />
+                  <span
+                    className="size-2 rounded-full"
+                    style={{ background: c, outline: '1px solid rgb(0 0 0 / 0.06)' }}
+                  />
                 </span>
               ))}
             </div>
 
             {/* 时间轴：回放知识网络的生长过程 */}
             {!!network?.neurons.length && (
-              <div className="absolute bottom-3 right-3 flex items-center gap-2 px-2.5 py-1.5 rounded-full bg-black/55 backdrop-blur-sm border border-white/10">
+              <div className={cn(FLOAT, 'bottom-3 right-3 flex items-center gap-2')}>
                 <button
                   onClick={() => setPlaying((p) => !p)}
                   title="回放你的知识网络是怎么长起来的"
-                  className="size-5 shrink-0 flex items-center justify-center rounded-full text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+                  className="size-5 shrink-0 flex items-center justify-center rounded-full text-[var(--text-muted)] hover:text-[var(--text)] hover:bg-[var(--bg-hover)] transition-colors"
                 >
                   {playing ? (
                     <svg viewBox="0 0 24 24" className="size-3" fill="currentColor">
@@ -310,11 +324,11 @@ export default function BrainPage() {
                     setPlaying(false)
                     setTimeline(Number(e.target.value))
                   }}
-                  className="w-24 accent-[#6fa8ff] h-1"
+                  className="w-24 accent-[var(--accent)] h-1"
                 />
                 <button
                   onClick={() => netRef.current?.fit()}
-                  className="text-[10px] text-white/50 hover:text-white/90 shrink-0"
+                  className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text)] shrink-0"
                 >
                   全览
                 </button>
@@ -323,10 +337,15 @@ export default function BrainPage() {
 
             {/* 网络还小时给个预期，别让人觉得功能坏了 */}
             {!loadingNet && !!network?.neurons.length && network.neurons.length < 12 && (
-              <div className="absolute bottom-3 left-3 max-w-[260px] px-3 py-2 rounded-[var(--radius)] bg-black/55 backdrop-blur-sm border border-white/10 pointer-events-none">
-                <div className="text-[11.5px] text-white/70 leading-relaxed">
+              <div
+                className={cn(
+                  FLOAT,
+                  'bottom-3 left-3 max-w-[260px] !rounded-[var(--radius)] pointer-events-none',
+                )}
+              >
+                <div className="text-[11.5px] text-[var(--text-muted)] leading-relaxed">
                   网络才 {network.neurons.length} 个神经元。
-                  <span className="text-white/45">
+                  <span className="text-[var(--text-subtle)]">
                     多学几节、多收几张卡，节点之间的聚类和孤岛会自己浮现出来。
                   </span>
                 </div>
