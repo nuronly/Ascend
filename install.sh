@@ -193,16 +193,38 @@ grep -q '^FRONTEND_DIST=' "$ENVF" || echo "FRONTEND_DIST=${ROOT}/frontend/dist" 
 sed -i "s|^APP_ENV=.*|APP_ENV=prod|" "$ENVF"
 grep -q '^RATE_LIMIT_ENABLED=' "$ENVF" || echo "RATE_LIMIT_ENABLED=true" >> "$ENVF"
 
-if [ "$SITE" = ":80" ]; then
-  # HTTP 下浏览器不保存 Secure cookie → 登录成功却立刻退回登录页
+# 站点到底跑没跑 HTTPS，不能只看 SITE_ADDRESS。
+# 用户可能手工给 Nginx 配好了证书（甚至加了 HTTP→HTTPS 跳转），
+# 而 SITE_ADDRESS 还停在 IP 模式 —— 这时把 Secure cookie 关掉就是错的：
+# 浏览器走的是 https，配置却按 http 来，两边对不上。
+# 所以直接从现有 Nginx 配置里把真实域名挖出来。
+nginx_https_host() {
+  local f=/etc/nginx/conf.d/ladder.conf
+  [ -f "$f" ] || return 1
+  grep -qE 'ssl_certificate|listen[[:space:]]+443' "$f" || return 1
+  # 两段过滤而不是 grep -vxE '_|'：空分支在 BSD grep 上会直接报错
+  sed -n 's/^[[:space:]]*server_name[[:space:]]*\(.*\);.*/\1/p' "$f" \
+    | tr ' ' '\n' | grep -v '^[[:space:]]*$' | grep -vx '_' | head -1
+}
+
+HTTPS_HOST=""
+if [ "$SITE" != ":80" ]; then
+  HTTPS_HOST="$SITE"
+elif HOST_FROM_NGX=$(nginx_https_host) && [ -n "$HOST_FROM_NGX" ]; then
+  HTTPS_HOST="$HOST_FROM_NGX"
+  warn "SITE_ADDRESS 是 IP 模式，但 Nginx 已配好 HTTPS" "按域名 $HTTPS_HOST 处理"
+fi
+
+if [ -z "$HTTPS_HOST" ]; then
+  # HTTP 下浏览器不回传 Secure cookie → 登录成功却立刻退回登录页
   sed -i "s|^COOKIE_SECURE=.*|COOKIE_SECURE=false|" "$ENVF"
   warn "IP + HTTP 模式（已自动关闭 Secure cookie）"
 else
-  # 域名模式：HTTPS 下必须打开 Secure，并把 CORS / 公开地址同步到域名
+  # HTTPS：必须打开 Secure，并把 CORS / 公开地址同步到域名
   sed -i "s|^COOKIE_SECURE=.*|COOKIE_SECURE=true|" "$ENVF"
-  sed -i "s|^CORS_ORIGINS=.*|CORS_ORIGINS=https://${SITE}|" "$ENVF"
-  sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=https://${SITE}|" "$ENVF"
-  ok "域名模式：$SITE（Secure cookie 与 CORS 已同步）"
+  sed -i "s|^CORS_ORIGINS=.*|CORS_ORIGINS=https://${HTTPS_HOST}|" "$ENVF"
+  sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=https://${HTTPS_HOST}|" "$ENVF"
+  ok "HTTPS 模式：$HTTPS_HOST（Secure cookie 与 CORS 已同步）"
 fi
 
 # ── 6. systemd ───────────────────────────────────────────────
@@ -332,13 +354,31 @@ command -v ufw >/dev/null 2>&1 && ufw allow 80/tcp >/dev/null 2>&1 && ufw allow 
 # ── 8. 自检 ──────────────────────────────────────────────────
 step "8/8  自检"
 sleep 2
-if curl -fsS -m 10 http://127.0.0.1/api/health >/dev/null 2>&1; then
-  ok "本机访问正常：$(curl -s -m 5 http://127.0.0.1/api/health)"
-else
-  warn "通过 Nginx 访问失败，直连后端试试："
-  curl -s -m 5 http://127.0.0.1:8788/api/health || true
-  tail -20 /var/log/nginx/error.log 2>/dev/null || true
-fi
+
+# 先直连后端，绕开 Nginx —— 分清是「服务没起来」还是「代理配错了」
+BACKEND_BODY=$(curl -fsS -m 10 http://127.0.0.1:8788/api/health 2>/dev/null || echo '')
+case "$BACKEND_BODY" in
+  *'"status":"ok"'*) ok "后端正常" "$BACKEND_BODY" ;;
+  *)
+    warn "后端直连失败，最近日志："
+    tail -20 "$ROOT/backend/logs/server.log" 2>/dev/null || true
+    ;;
+esac
+
+# 再走一遍 Nginx。必须加 -L：站点一旦配了 HTTPS，HTTP 会被 301 跳走，
+# 而 curl -fsS 不把 301 当失败 —— 原来的写法会把一张「301 Moved Permanently」
+# 的 HTML 当作健康检查通过，等于什么都没验证到
+NGX_BODY=$(curl -fsSL -k -m 12 http://127.0.0.1/api/health 2>/dev/null || echo '')
+case "$NGX_BODY" in
+  *'"status":"ok"'*) ok "Nginx 代理正常" ;;
+  '')
+    warn "通过 Nginx 访问不通"
+    tail -10 /var/log/nginx/error.log 2>/dev/null || true
+    ;;
+  *)
+    warn "通过 Nginx 拿到的不是健康检查响应" "$(printf '%.80s' "$NGX_BODY")"
+    ;;
+esac
 
 "$ROOT/backend/.venv/bin/python" "$ROOT/backend/scripts/preflight.py" 2>/dev/null || true
 
