@@ -117,6 +117,15 @@ async def csrf_origin_guard(request: Request, call_next):
             and not _is_same_origin(origin, request)
             and origin not in settings.cors_origin_list
         ):
+            # 排查部署差异时这条日志是唯一的真相来源
+            log.warning(
+                "CSRF 拦截: origin=%r host=%r x-forwarded-host=%r forwarded=%r whitelist=%r",
+                origin,
+                request.headers.get("host"),
+                request.headers.get("x-forwarded-host"),
+                request.headers.get("x-forwarded-for"),
+                settings.cors_origin_list,
+            )
             return JSONResponse(
                 {"detail": "请求来源不被信任"}, status_code=status.HTTP_403_FORBIDDEN
             )

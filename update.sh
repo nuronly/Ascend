@@ -49,6 +49,9 @@ if [ "$OLD" != "$NEW" ] && git diff --name-only "$OLD" "$NEW" | grep -q '^fronte
   exec ./install.sh
 else
   printf "\n${B}重启后端…${X}\n"
+  # 清掉字节码缓存 —— 服务器时钟异常时旧 .pyc 可能比新 .py "更新"，
+  # Python 会继续加载旧代码，表现就是"代码改了行为没变"
+  find backend/app -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
   systemctl restart ladder
   sleep 4
   systemctl is-active --quiet ladder || {
