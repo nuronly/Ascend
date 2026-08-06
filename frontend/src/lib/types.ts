@@ -4,6 +4,8 @@ export interface User {
   id: string
   email: string
   name: string
+  /** 游客账号：多人共享，数据互通 */
+  is_guest?: boolean
   settings: {
     theme?: 'light' | 'dark' | 'system'
     daily_token_quota?: number

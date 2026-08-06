@@ -78,6 +78,7 @@ async def init_db() -> None:
                 except Exception as exc:
                     log.warning("创建扩展 %s 失败：%s", ext, exc)
         await conn.run_sync(Base.metadata.create_all)
+        await _migrate_light(conn)
 
     await ensure_fts(engine)
 
@@ -85,6 +86,27 @@ async def init_db() -> None:
         await _sqlite_checkpoint()
 
     log.info("数据库就绪：%s", settings.resolved_database_url.split("://")[0])
+
+
+async def _migrate_light(conn) -> None:
+    """轻量迁移：给已存在的库补新列。
+
+    create_all 只建缺失的表，不会给已有表加列。项目没有引入 Alembic
+     migration 链（表结构在设计时一次埋齐，新增列极少），
+    所以用「查 pragma，缺就补」的最小方案，SQLite / PostgreSQL 通用。
+    """
+    if settings.is_sqlite:
+        rows = (await conn.execute(text("PRAGMA table_info(users)"))).all()
+        cols = {r[1] for r in rows}
+        if "is_guest" not in cols:
+            await conn.execute(
+                text("ALTER TABLE users ADD COLUMN is_guest BOOLEAN NOT NULL DEFAULT 0")
+            )
+            log.info("迁移：users 表补充 is_guest 列")
+    else:  # pragma: no cover
+        await conn.execute(
+            text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE")
+        )
 
 
 async def _sqlite_checkpoint() -> None:

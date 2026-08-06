@@ -24,7 +24,7 @@ _last_sweep = 0.0
 
 # 真正烧钱的路径：命中这些走 AI 配额
 _AI_PATHS = ("/ask", "/stream", "/translate", "/courses", "/review/", "/brain/", "/badges")
-_AUTH_PATHS = ("/api/auth/login", "/api/auth/register", "/api/auth/refresh")
+_AUTH_PATHS = ("/api/auth/login", "/api/auth/register", "/api/auth/refresh", "/api/auth/guest")
 
 
 def _client_ip(request: Request) -> str:

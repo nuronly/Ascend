@@ -20,7 +20,9 @@ export default function LoginPage() {
   const { data: cfg } = useQuery({
     queryKey: ['auth-config'],
     queryFn: () =>
-      api.get<{ allow_registration: boolean; invite_required: boolean }>('/auth/config'),
+      api.get<{ allow_registration: boolean; invite_required: boolean; guest_enabled?: boolean }>(
+        '/auth/config',
+      ),
     staleTime: Infinity,
     retry: false,
   })
@@ -53,6 +55,20 @@ export default function LoginPage() {
       nav(location.state?.from ?? '/', { replace: true })
     } catch (err: any) {
       setError(err?.message ?? '出错了，请重试')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const enterAsGuest = async () => {
+    setError('')
+    setBusy(true)
+    try {
+      const u = await api.post<User>('/auth/guest')
+      setUser(u)
+      nav(location.state?.from ?? '/', { replace: true })
+    } catch (err: any) {
+      setError(err?.message ?? '游客入口暂不可用')
     } finally {
       setBusy(false)
     }
@@ -213,6 +229,29 @@ export default function LoginPage() {
             <p className="w-full mt-4 text-[12.5px] text-[var(--text-subtle)] text-center">
               本站暂未开放注册
             </p>
+          )}
+
+          {cfg?.guest_enabled && (
+            <>
+              <div className="flex items-center gap-3 mt-6">
+                <span className="grow h-px bg-[var(--border)]" />
+                <span className="text-[11px] text-[var(--text-subtle)]">或</span>
+                <span className="grow h-px bg-[var(--border)]" />
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="md"
+                loading={busy}
+                onClick={enterAsGuest}
+                className="w-full mt-3"
+              >
+                游客模式进入
+              </Button>
+              <p className="mt-2.5 text-[11px] leading-relaxed text-[var(--text-subtle)] text-center">
+                免注册直接体验。学习数据与其他游客共享。
+              </p>
+            </>
           )}
 
           <div className="mt-8 text-center">

@@ -210,6 +210,24 @@ export function Layout({ children }: { children: React.ReactNode }) {
 
       {/* ── 主区 ── */}
       <main className={cn('grow min-w-0 flex flex-col', immersive ? 'overflow-hidden' : 'overflow-y-auto')}>
+        {/* 游客横幅：常驻、不碍事，但要把「数据共享」说在前头 */}
+        {user?.is_guest && (
+          <div className="shrink-0 flex items-center justify-center gap-2 px-4 py-1.5 text-[12px] bg-[color-mix(in_oklch,var(--accent)_7%,transparent)] text-[var(--text-muted)] border-b border-[var(--border)]">
+            <span>
+              您处于<b className="text-[var(--text)]">游客模式</b>
+              ，学习数据与其他人共享
+            </span>
+            <span className="opacity-40">·</span>
+            <button
+              onClick={() => {
+                logout().then(() => nav('/login'))
+              }}
+              className="text-[var(--accent)] hover:underline underline-offset-2"
+            >
+              去登录
+            </button>
+          </div>
+        )}
         {children}
       </main>
 

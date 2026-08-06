@@ -24,6 +24,9 @@ class User(Base):
     oauth_provider: Mapped[str | None] = mapped_column(String(40))
     oauth_sub: Mapped[str | None] = mapped_column(String(255))
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # 游客账号：多人共享同一个演示身份，数据互通（比赛/体验场景）。
+    # 只做标记，权限与正式账号一致 —— 限制全部落在额度与入口限流上
+    is_guest: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     # 含 daily_token_quota / theme 等
     settings: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=utcnow, nullable=False)

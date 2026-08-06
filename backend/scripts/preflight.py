@@ -92,6 +92,16 @@ def check_config() -> None:
             bits.append(f"上限 {settings.max_users} 人")
         ok("准入受控", " · ".join(bits))
 
+    if settings.guest_enabled:
+        # 游客共享一个账号、共烧一份额度。演示场景是特性，长期开放是风险
+        if settings.guest_daily_token_quota > settings.daily_token_quota:
+            warn(
+                f"游客额度 {settings.guest_daily_token_quota:,} 高于正式用户",
+                "所有人共烧这一份，建议调低 GUEST_DAILY_TOKEN_QUOTA",
+            )
+        else:
+            ok("游客模式已开启", f"共享额度 {settings.guest_daily_token_quota:,} tokens/天")
+
     if settings.daily_token_quota <= 0:
         fail("DAILY_TOKEN_QUOTA=0（不限额）", "单个用户就能刷爆账单")
     elif settings.daily_token_quota > 2_000_000:

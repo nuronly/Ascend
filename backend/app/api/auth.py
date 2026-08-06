@@ -44,10 +44,17 @@ class UserOut(BaseModel):
     email: str
     name: str
     settings: dict = {}
+    is_guest: bool = False
 
     @classmethod
     def of(cls, u: User) -> UserOut:
-        return cls(id=u.id, email=u.email, name=u.name, settings=u.settings or {})
+        return cls(
+            id=u.id,
+            email=u.email,
+            name=u.name,
+            settings=u.settings or {},
+            is_guest=u.is_guest,
+        )
 
 
 class SettingsIn(BaseModel):
@@ -109,11 +116,59 @@ async def _issue_refresh(db: Db, user_id: str, request: Request) -> str:
 # ─────────────────────────────────────────────────────────────
 @router.get("/config")
 async def auth_config() -> dict:
-    """给登录页用：是否开放注册、要不要邀请码。"""
+    """给登录页用：是否开放注册、要不要邀请码、有没有游客入口。"""
     return {
         "allow_registration": settings.allow_registration,
         "invite_required": bool(settings.invite_code),
+        "guest_enabled": settings.guest_enabled,
     }
+
+
+GUEST_EMAIL = "guest@ladder.local"
+
+
+@router.post("/guest", response_model=UserOut)
+async def guest_login(request: Request, response: Response, db: Db) -> UserOut:
+    """游客模式：免密进入一个共享的演示账号。
+
+    所有游客共用同一个 user_id —— 数据互通是这个功能的预期行为
+    （比赛/演示场景：评委打开就能看到别人玩出来的内容）。
+    防护不放在账号上，放在入口处：
+      · settings.guest_enabled 一键关闭
+      · /auth/guest 走认证限流（ratelimit 的 _AUTH_PATHS）
+      · 该账号有独立的每日 token 额度，烧完只影响游客，不伤正式用户
+    """
+    if not settings.guest_enabled:
+        # 404 而非 403：不暴露这个入口的存在性
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found")
+
+    user = await db.scalar(select(User).where(User.email == GUEST_EMAIL))
+    if user is None:
+        user = User(
+            id=new_id(),
+            email=GUEST_EMAIL,
+            name="游客",
+            # 无密码：这个账号永远不可能通过密码登录，只能走本端点
+            password_hash=None,
+            email_verified=True,
+            is_guest=True,
+            settings={
+                "theme": "system",
+                "default_pomodoro_minutes": 25,
+                "daily_token_quota": settings.guest_daily_token_quota,
+            },
+            created_at=utcnow(),
+        )
+        db.add(user)
+        await db.flush()
+    elif not user.is_guest:
+        # 这个邮箱若被正式注册占用过，绝不能把它变成游客入口
+        raise HTTPException(status.HTTP_409_CONFLICT, "游客账号与现有账号冲突")
+
+    refresh = await _issue_refresh(db, user.id, request)
+    await db.commit()
+    _set_auth_cookies(response, create_access_token(user.id), refresh)
+    return UserOut.of(user)
 
 
 @router.post("/register", response_model=UserOut, status_code=status.HTTP_201_CREATED)

@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     invite_code: str = ""
     # 全站用户数上限，0 = 不限
     max_users: int = 0
+    # 游客模式：登录页提供免密入口，所有人共享同一个 guest 账号。
+    # 面向比赛/演示场景 —— 数据互通是特性不是缺陷，但意味着任何游客
+    # 都能看到其他游客产生的内容，且额度是所有人共烧一份。
+    guest_enabled: bool = True
+    # 游客账号的每日 token 额度（共享账号，烧的是所有人的份）
+    guest_daily_token_quota: int = 200_000
 
     # ── 静态前端（单体部署时由后端直接提供）──
     serve_frontend: bool = False
