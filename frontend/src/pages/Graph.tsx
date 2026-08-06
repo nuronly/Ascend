@@ -149,6 +149,10 @@ function GraphCanvas({ courseId }: { courseId: string }) {
   const [cardDetail, setCardDetail] = useState<Card | null>(null)
   const [hover, setHover] = useState<HoverInfo | null>(null)
   const [reinforcing, setReinforcing] = useState('')
+  // 画布初始化失败时把错误摆出来 —— 空白画布和「没数据」长得一模一样，
+  // 没有错误显示就永远分不清是渲染挂了还是真空（这个亏吃过三次）
+  const [renderError, setRenderError] = useState('')
+  const [retryTick, setRetryTick] = useState(0)
 
   const { data: courses } = useQuery({
     queryKey: ['courses'],
@@ -272,23 +276,51 @@ function GraphCanvas({ courseId }: { courseId: string }) {
   useEffect(() => {
     const box = boxRef.current
     if (!box || !nodeCount) return
+    setRenderError('')
 
-    const cy = cytoscape({
-      container: box,
-      elements,
-      style: makeStylesheet(dark ? DARK : LIGHT),
-      layout: { name: 'preset' }, // 真正的布局在下面按视图分派
-      minZoom: 0.15,
-      maxZoom: 3,
-      wheelSensitivity: 0.22,
-    })
-    cyRef.current = cy
-    touchedRef.current = false
+    let cy: Core
+    try {
+      cy = cytoscape({
+        container: box,
+        elements,
+        style: makeStylesheet(dark ? DARK : LIGHT),
+        layout: { name: 'preset' }, // 真正的布局在下面按视图分派
+        minZoom: 0.15,
+        maxZoom: 3,
+        wheelSensitivity: 0.22,
+      })
+      cyRef.current = cy
+      touchedRef.current = false
 
-    runLayout(cy, view)
-    // 立即 fit 一次；首帧容器常常还没定稿，下一帧再补一次。
-    // 更晚的变化（窗口缩放、侧栏展开）由下面的 ResizeObserver 兜住
-    fit()
+      runLayout(cy, view)
+
+      // 自检：布局后节点位置必须有限且散开，否则就是渲染管线出了问题
+      const bb = cy.elements().boundingBox()
+      const bad =
+        cy.nodes().length === 0 ||
+        !isFinite(bb.x1) ||
+        !isFinite(bb.x2) ||
+        !isFinite(bb.y1) ||
+        !isFinite(bb.y2)
+      if (bad) {
+        throw new Error(
+          `布局结果异常：${cy.nodes().length} 个节点，包围盒 (${bb.x1}, ${bb.y1}) ~ (${bb.x2}, ${bb.y2})`,
+        )
+      }
+
+      // 立即 fit 一次；首帧容器常常还没定稿，下一帧再补一次。
+      // 更晚的变化（窗口缩放、侧栏展开）由下面的 ResizeObserver 兜住
+      fit()
+    } catch (err) {
+      const box2 = boxRef.current
+      setRenderError(
+        `${err instanceof Error ? err.message : String(err)}\n` +
+          `（节点 ${nodeCount} · 容器 ${box2?.clientWidth ?? '?'}×${box2?.clientHeight ?? '?'}）`,
+      )
+      cyRef.current?.destroy()
+      cyRef.current = null
+      return
+    }
     const raf = requestAnimationFrame(fit)
 
     cy.on('mousedown wheel', () => {
@@ -351,7 +383,7 @@ function GraphCanvas({ courseId }: { courseId: string }) {
       cy.destroy()
       cyRef.current = null
     }
-  }, [elements, nodeCount, view, dark, fit])
+  }, [elements, nodeCount, view, dark, fit, retryTick])
 
   const reinforce = async (concept: string) => {
     setReinforcing(concept)
@@ -448,6 +480,29 @@ function GraphCanvas({ courseId }: { courseId: string }) {
           ) : null}
 
           <div ref={boxRef} className="absolute inset-0" />
+
+          {/* 渲染失败：把错误摆出来，而不是留一片空白让人猜 */}
+          {renderError && (
+            <div className="absolute inset-0 z-20 flex items-center justify-center">
+              <div className="max-w-md px-6 text-center">
+                <div className="text-[14px] font-medium text-[var(--text)]">图谱渲染失败</div>
+                <pre className="mt-2 text-[12px] text-[var(--text-muted)] leading-relaxed whitespace-pre-wrap text-left bg-[var(--bg-sunken)] border border-[var(--border)] rounded-[var(--radius)] p-3">
+                  {renderError}
+                </pre>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  className="mt-3"
+                  onClick={() => {
+                    setRenderError('')
+                    setRetryTick((t) => t + 1)
+                  }}
+                >
+                  重试
+                </Button>
+              </div>
+            </div>
+          )}
 
           {/* 悬停信息卡 */}
           {hover && (
