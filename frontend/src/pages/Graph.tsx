@@ -10,6 +10,7 @@ import { Badge, Button, Empty, Modal, Progress, Segmented, Spinner } from '@/com
 import { cn, relativeTime, truncate } from '@/lib/utils'
 import { type GraphView as View, runLayout } from '@/lib/graphLayout'
 import { DARK, LIGHT, makeStylesheet } from '@/lib/graphTheme'
+import { reportGuideStep } from '@/lib/guide'
 import { useIsDark } from '@/lib/useTheme'
 
 /**
@@ -141,6 +142,10 @@ function GraphCanvas({ courseId }: { courseId: string }) {
   const cyRef = useRef<Core | null>(null)
   const touchedRef = useRef(false) // 用户是否手动缩放/拖动过
   const dark = useIsDark()
+
+  useEffect(() => {
+    reportGuideStep('view_graph') // 引导打点（静默）
+  }, [])
 
   // /graph/all 是"跨课程问题图"的伪 id
   const allMode = courseId === 'all'

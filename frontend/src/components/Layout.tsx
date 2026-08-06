@@ -1,10 +1,14 @@
+import { useEffect, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import { api } from '@/lib/api'
+import { queryClient } from '@/lib/queryClient'
 import { useAuth, useTheme } from '@/lib/store'
 import { cn, initials } from '@/lib/utils'
+import { GuideTour } from './GuideTour'
 import { PomodoroPill, PomodoroReview } from './Pomodoro'
 import { Tip } from './ui'
+import type { GuideProgress } from '@/lib/guide'
 
 const NAV = [
   {
@@ -105,6 +109,29 @@ export function Layout({ children }: { children: React.ReactNode }) {
   const { theme, setTheme } = useTheme()
   const nav = useNavigate()
   const location = useLocation()
+  const [guideOpen, setGuideOpen] = useState(false)
+
+  // 引导进度（比赛演示功能，之后下线）
+  const { data: guide } = useQuery({
+    queryKey: ['guide-progress'],
+    queryFn: () => api.get<GuideProgress>('/guide/progress'),
+    staleTime: 15_000,
+  })
+
+  // 新注册账号首次登录时自动弹出（注册 30 分钟内）。
+  // 游客不自动弹 —— 共享账号的状态会互相干扰，评委走右上角按钮手动开。
+  useEffect(() => {
+    if (!user || !guide || user.is_guest) return
+    if (guide.started || guide.dismissed) return
+    const fresh =
+      user.created_at && Date.now() - new Date(user.created_at).getTime() < 30 * 60_000
+    if (!fresh) return
+    api
+      .post('/guide/start')
+      .then(() => queryClient.invalidateQueries({ queryKey: ['guide-progress'] }))
+      .catch(() => {})
+    setGuideOpen(true)
+  }, [user, guide])
 
   // 复习到期数：每分钟刷一次就够，别打扰
   const { data: reviewStats } = useQuery({
@@ -231,11 +258,31 @@ export function Layout({ children }: { children: React.ReactNode }) {
         {children}
       </main>
 
-      {/* 右上角：使用说明 + 番茄钟。
+      {/* 右上角：引导 + 使用说明 + 番茄钟。
           沉浸页面（讲解页/文档页）不挂，那里工具栏自己有位置。 */}
       {!immersive && (
         <div className="fixed top-3 right-4 z-40 flex items-center gap-2">
           <PomodoroPill />
+          {/* 新手引导入口：所有人可见（含游客），比赛演示用，之后下线 */}
+          <button
+            onClick={() => setGuideOpen((v) => !v)}
+            className={cn(
+              'flex items-center gap-1.5 h-7 px-2.5 rounded-full',
+              'border transition-colors',
+              guideOpen
+                ? 'border-[var(--accent)] text-[var(--accent)] bg-[var(--accent-soft)]'
+                : 'border-[var(--border)] bg-[var(--bg-raised)]/85 backdrop-blur-sm text-[var(--text-muted)] hover:text-[var(--text)] hover:border-[var(--border-strong)]',
+            )}
+          >
+            <svg viewBox="0 0 24 24" className="size-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" />
+              <path d="M18.5 15.5l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" />
+            </svg>
+            <span className="text-[12px]">新手引导</span>
+            {guide && !guide.dismissed && guide.steps.some((s) => !s.done) && (
+              <span className="size-1.5 rounded-full bg-[var(--accent)]" />
+            )}
+          </button>
           <NavLink
             to="/guide"
             className={cn(
@@ -253,6 +300,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
           </NavLink>
         </div>
       )}
+
+      {guideOpen && <GuideTour onClose={() => setGuideOpen(false)} />}
 
       <PomodoroReview />
     </div>

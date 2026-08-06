@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
 from pydantic import BaseModel, EmailStr, Field
@@ -45,6 +45,7 @@ class UserOut(BaseModel):
     name: str
     settings: dict = {}
     is_guest: bool = False
+    created_at: datetime | None = None
 
     @classmethod
     def of(cls, u: User) -> UserOut:
@@ -54,6 +55,7 @@ class UserOut(BaseModel):
             name=u.name,
             settings=u.settings or {},
             is_guest=u.is_guest,
+            created_at=u.created_at,
         )
 
 

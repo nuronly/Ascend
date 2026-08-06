@@ -173,6 +173,7 @@ from app.api import (  # noqa: E402
     documents,
     export,
     graph,
+    guide,
     pomodoro,
     review,
     vault,
@@ -189,6 +190,7 @@ for r in (
     brain.router,
     review.router,
     badges.router,
+    guide.router,
     export.router,
 ):
     app.include_router(r, prefix="/api")

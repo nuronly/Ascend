@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, sse } from '@/lib/api'
 import { useCardSpace } from '@/lib/cardSpace'
+import { reportGuideStep } from '@/lib/guide'
 import { usePomodoro, toast } from '@/lib/store'
 import type { SectionDetail } from '@/lib/types'
 import { Markdown } from '@/components/Markdown'
@@ -107,6 +108,7 @@ export default function SectionPage() {
   // 进入小节：加载已有正文或触发生成，同时加载卡片、起番茄
   useEffect(() => {
     if (!section) return
+    reportGuideStep('read_section') // 引导打点（静默，不影响主流程）
     if (section.content_md) {
       setContent(section.content_md)
       setGenerating(false)

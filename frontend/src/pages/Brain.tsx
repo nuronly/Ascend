@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api, sse } from '@/lib/api'
 import type { Card, Citation } from '@/lib/types'
 import { DARK_PALETTE, LIGHT_PALETTE, type NetworkData } from '@/lib/neural'
+import { reportGuideStep } from '@/lib/guide'
 import { useIsDark } from '@/lib/useTheme'
 import { Markdown } from '@/components/Markdown'
 import { NeuralNetwork, type NeuralHandle } from '@/components/NeuralNetwork'
@@ -131,6 +132,7 @@ export default function BrainPage() {
         if (ev === 'citations') {
           setStatus('')
           setStage(null)
+          reportGuideStep('ask_brain') // 引导打点：问到答案就算完成
           const cites: Citation[] = data?.citations ?? []
           // 最终被引用的节点持续脉冲，并沿它们的连接再发一轮信号
           netRef.current?.activate(

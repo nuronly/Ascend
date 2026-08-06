@@ -32,7 +32,10 @@ const OVERLAY = {
   coverage: 0.2,
 }
 
-const apiMock = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }))
+const apiMock = vi.hoisted(() => ({
+  get: vi.fn(),
+  post: vi.fn(() => Promise.resolve({})),
+}))
 vi.mock('@/lib/api', () => ({ api: apiMock, sse: vi.fn() }))
 
 // jsdom 没有 canvas 2d 上下文，cytoscape 会退化为不绘制但逻辑照跑
