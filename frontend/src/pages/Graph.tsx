@@ -479,7 +479,15 @@ function GraphCanvas({ courseId }: { courseId: string }) {
             </div>
           ) : null}
 
-          <div ref={boxRef} className="absolute inset-0" />
+          {/*
+            ★ 千万别写 absolute inset-0：cytoscape 初始化时会往容器注入
+            .cytoscape_container { position: relative }（同特异性、后注入胜出），
+            把 absolute 顶掉之后 inset-0 只剩偏移、不再拉伸 ——
+            父级高度正常，容器却塌成宽×0，节点全压在 y=0 一条线上。
+            这就是「概念图空白」追了三天的根因。
+            用 size-full 让 cytoscape 自己的 relative 正好工作。
+          */}
+          <div ref={boxRef} className="size-full" />
 
           {/* 渲染失败：把错误摆出来，而不是留一片空白让人猜 */}
           {renderError && (
