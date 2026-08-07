@@ -35,7 +35,10 @@ router = APIRouter(prefix="/cards", tags=["cards"])
 # Schemas
 # ─────────────────────────────────────────────────────────────
 class CreateCardIn(BaseModel):
-    selected_text: str = Field(min_length=1, max_length=2000)
+    # 手动建卡（origin=manual）没有划中的文本，卡片标题由 question 顶上
+    # （前端 CardNode 已有 selected_text || question 的回落）。
+    # 具体校验按 origin 分流，见 create_card。
+    selected_text: str = Field(default="", max_length=2000)
     question: str = Field(default="", max_length=2000)
     context_text: str = Field(default="", max_length=4000)
     source_type: str = Field(default="course", pattern="^(course|doc|brain)$")
@@ -236,6 +239,15 @@ async def create_card(body: CreateCardIn, scope: Scope) -> dict:
         body.source_section_id or body.source_doc_block_id or body.parent_card_id
     ):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "根卡必须指定来源小节或文档段落")
+    # 两种建卡方式各有各的必填项：划词卡靠选中的文本立身，
+    # 手动卡没有划词、全靠问题本身，问题空了这张卡就没有内容了
+    if body.origin == ORIGIN_MANUAL:
+        if not body.question.strip():
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "手动建卡必须写下问题")
+        if not (body.source_section_id or body.source_doc_block_id):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "手动建卡必须指定来源小节或文档")
+    elif not body.selected_text.strip():
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "划词建卡必须带上选中的文本")
 
     card = await svc.create_card(
         scope,

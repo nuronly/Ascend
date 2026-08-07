@@ -191,12 +191,18 @@ def card_context(
             chain.append(f"  · 「{a.get('selected_text', '')}」→ {brief[:120]}")
         parts.append("他一路追问下来的链条（由浅入深）：\n" + "\n".join(chain))
 
-    where = {
-        "source_text": "课程正文",
-        "parent_answer": "你上一条回答",
-        "parent_note": "他自己写下的理解",
-    }.get(origin, "正文")
-    parts.append(f"这次他在【{where}】中划中了：「{selected_text}」")
+    if origin == "manual" or not selected_text.strip():
+        # 手动建卡：没有划词，问题往往是整体性的（这节和上节什么关系、
+        # 为什么要这么设计）。这里不能拼出「划中了「」」的空引用，
+        # 否则模型会围着一个不存在的词打转。
+        parts.append("这次他没有划词，而是直接就当前学习的内容提问。")
+    else:
+        where = {
+            "source_text": "课程正文",
+            "parent_answer": "你上一条回答",
+            "parent_note": "他自己写下的理解",
+        }.get(origin, "正文")
+        parts.append(f"这次他在【{where}】中划中了：「{selected_text}」")
 
     if context_text:
         parts.append(f"划中处的上下文：\n> {context_text[:600]}")

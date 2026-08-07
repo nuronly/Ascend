@@ -15,6 +15,7 @@ import {
 } from '@xyflow/react'
 import { CardNode, type CardNodeData } from './CardNode'
 import { SelectionDemo } from './SelectionDemo'
+import { ManualAskInline, ManualAskToolbarButton } from './ManualAsk'
 import { useCardSpace } from '@/lib/cardSpace'
 import { RELATION_COLORS, type Card, type CardLink } from '@/lib/types'
 import { cn, widthForDepth } from '@/lib/utils'
@@ -308,13 +309,14 @@ function Canvas({ className }: { className?: string }) {
         />
       </ReactFlow>
 
-      {cards.length > 1 && (
-        <div className="absolute bottom-3 left-3 z-10 flex gap-1.5">
+      <div className="absolute bottom-3 left-3 z-10 flex gap-1.5">
+        <ManualAskToolbarButton />
+        {cards.length > 1 && (
           <Button size="xs" variant="subtle" onClick={() => fitView({ padding: 0.2, duration: 300 })}>
             全览
           </Button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   )
 }
@@ -341,6 +343,8 @@ export function CardSpace({ className }: { className?: string }) {
         </div>
 
         <SelectionDemo />
+
+        <ManualAskInline />
 
         <ol className="space-y-2 text-[12px] text-[var(--text-muted)] max-w-[280px]">
           {[
