@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach } from 'vitest'
-import { readSelection, findAnchor } from './useSelection'
+import { findAnchor, isEditable, isKeyboardSelecting, readSelection } from './useSelection'
 
 /**
  * 划词是本产品唯一的核心动作，却曾经完全失效 —— 用户反馈「选中好像没效果」。
@@ -170,5 +170,80 @@ describe('findAnchor 回跳', () => {
   it('正文重写后引文消失 → 返回 null 而不是报错', () => {
     const el = mount('<p>完全不同的新正文</p>')
     expect(findAnchor(el, { exact: 'softmax', prefix: '通过 ' })).toBeNull()
+  })
+})
+
+/**
+ * 提问框里打字被误判成「键盘选词」，导致输入框凭空消失。
+ *
+ * 用户反馈：「按住 shift 同时按其他键，松开其他键会使输入框直接消失」。
+ * 原因是 keyup 处理只判断了 e.shiftKey —— 在 textarea 里按 Shift+字母
+ * 打大写、Shift+Enter 换行时，松开字母那一刻 Shift 仍按着，
+ * 于是被当作选词动作去重算选区；而焦点在输入框里、正文选区早已不在，
+ * readSelection 返回 null，提问框连同已输入的内容一起没了。
+ */
+describe('isKeyboardSelecting：哪些按键才算在选词', () => {
+  const key = (init: Partial<KeyboardEventInit> & { key: string }, target?: HTMLElement) => {
+    const e = new KeyboardEvent('keyup', { bubbles: true, ...init })
+    Object.defineProperty(e, 'target', { value: target ?? document.body })
+    return e
+  }
+
+  const editable = (tag: 'textarea' | 'input') => {
+    document.body.innerHTML = ''
+    const box = document.createElement('div')
+    box.setAttribute('data-selection-ui', '')
+    const el = document.createElement(tag)
+    box.appendChild(el)
+    document.body.appendChild(box)
+    return el
+  }
+
+  it('★ 回归：在提问框里按 Shift+字母，不能被当成选词', () => {
+    const ta = editable('textarea')
+    // 松开 A 时 Shift 仍按着 —— 正是用户遇到的那一刻
+    expect(isKeyboardSelecting(key({ key: 'A', shiftKey: true }, ta))).toBe(false)
+  })
+
+  it('★ 回归：在提问框里按 Shift+Enter 换行，不能被当成选词', () => {
+    const ta = editable('textarea')
+    expect(isKeyboardSelecting(key({ key: 'Enter', shiftKey: true }, ta))).toBe(false)
+  })
+
+  it('在输入框里按 Shift+方向键（选自己打的字）也不该触发', () => {
+    const input = editable('input')
+    expect(isKeyboardSelecting(key({ key: 'ArrowLeft', shiftKey: true }, input))).toBe(false)
+  })
+
+  it('正文里 Shift+方向键 —— 这才是键盘选词，必须保留', () => {
+    document.body.innerHTML = '<p>正文</p>'
+    const p = document.querySelector('p')!
+    expect(isKeyboardSelecting(key({ key: 'ArrowRight', shiftKey: true }, p as HTMLElement))).toBe(true)
+    expect(isKeyboardSelecting(key({ key: 'End', shiftKey: true }, p as HTMLElement))).toBe(true)
+  })
+
+  it('正文里 Ctrl/Cmd+A 全选也算', () => {
+    document.body.innerHTML = '<p>正文</p>'
+    const p = document.querySelector('p') as HTMLElement
+    expect(isKeyboardSelecting(key({ key: 'a', metaKey: true }, p))).toBe(true)
+  })
+
+  it('正文里单按字母或单独松开 Shift，都不算选词', () => {
+    document.body.innerHTML = '<p>正文</p>'
+    const p = document.querySelector('p') as HTMLElement
+    expect(isKeyboardSelecting(key({ key: 'A', shiftKey: true }, p))).toBe(false)
+    expect(isKeyboardSelecting(key({ key: 'Shift', shiftKey: false }, p))).toBe(false)
+  })
+})
+
+describe('isEditable', () => {
+  it('认得出输入控件与 contenteditable', () => {
+    document.body.innerHTML =
+      '<textarea></textarea><input /><div contenteditable="true"></div><p>正文</p>'
+    expect(isEditable(document.querySelector('textarea'))).toBe(true)
+    expect(isEditable(document.querySelector('input'))).toBe(true)
+    expect(isEditable(document.querySelector('[contenteditable]'))).toBe(true)
+    expect(isEditable(document.querySelector('p'))).toBe(false)
+    expect(isEditable(null)).toBe(false)
   })
 })

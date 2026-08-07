@@ -64,6 +64,51 @@ function inside(container: HTMLElement, node: Node | null): boolean {
   return container.contains(node.nodeType === Node.TEXT_NODE ? node.parentNode : node)
 }
 
+/** 焦点在输入控件里 —— 此时的键鼠操作属于「打字」，与划词无关 */
+export function isEditable(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el || el.nodeType !== Node.ELEMENT_NODE) return false
+  const tag = el.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return true
+  // 不能只看 isContentEditable：事件 target 可能是可编辑区里的子元素
+  // （<div contenteditable><b>字</b></div> 点在 b 上），
+  // 且 jsdom 根本不实现这个属性。closest 两头都兜住。
+  return (
+    el.isContentEditable === true ||
+    el.closest?.('[contenteditable=""], [contenteditable="true"]') !== null
+  )
+}
+
+/** 会移动或扩展选区的按键。字母、数字、Enter 等一律与选词无关 */
+const CARET_KEYS = new Set([
+  'ArrowLeft',
+  'ArrowRight',
+  'ArrowUp',
+  'ArrowDown',
+  'Home',
+  'End',
+  'PageUp',
+  'PageDown',
+])
+
+/**
+ * 这次 keyup 是否真的是「用键盘在选词」。
+ *
+ * ★ 曾经这里只判断 e.shiftKey，结果把提问框里的打字全部误伤：
+ *   在输入框按 Shift+字母（打大写）或 Shift+Enter（换行）时，
+ *   松开字母那一刻 Shift 还按着 → shiftKey 仍为 true → 触发重算选区
+ *   → 而此时焦点在 textarea 里、正文选区早已不存在
+ *   → readSelection 返回 null → 提问框直接消失，已输入的内容全丢。
+ *   现象很迷惑：松开 Shift 本身没事，松开另一个键才炸。
+ */
+export function isKeyboardSelecting(e: KeyboardEvent): boolean {
+  if (isEditable(e.target)) return false
+  if ((e.target as HTMLElement | null)?.closest?.('[data-selection-ui]')) return false
+  if (e.shiftKey && CARET_KEYS.has(e.key)) return true
+  // 全选也会产生选区
+  return (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a'
+}
+
 export function readSelection(container: HTMLElement | null): SelectionInfo | null {
   if (!container) return null
   const sel = window.getSelection()
@@ -159,12 +204,14 @@ export function useSelection(enabled = true) {
       const t = e.target as HTMLElement | null
       // 点在浮动按钮上时不要重算，否则按钮一按下就自己消失了
       if (t?.closest?.('[data-selection-ui]')) return
+      // 在输入框里拖选自己打的字，也不该被当成划词
+      if (isEditable(e.target)) return
       // 等浏览器把选区最终确定下来（双击/三击尤其需要这一帧）
       setTimeout(read, 0)
     }
 
     const onKeyUp = (e: KeyboardEvent) => {
-      if (e.shiftKey) setTimeout(read, 0)
+      if (isKeyboardSelecting(e)) setTimeout(read, 0)
     }
 
     document.addEventListener('mouseup', onPointerUp)
