@@ -3,8 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>阶梯 · 以疑问为原子单位的学习工作台</title>
+    <title>阶梯计划 · 以疑问为原子单位的学习工作台</title>
     <meta name="description" content="课程与文档只是投喂内容的入口，卡片才是核心。" />
+
+    <!-- 阶梯 logo，SVG 内已自带深浅色适配 -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- 移动端地址栏配色跟随主题，与 --bg 对齐（index.css: --g-50 / --g-950） -->
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#fafafa" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0e0f12" />
     <script>
       // 在首帧之前定主题，避免深色模式下的白屏闪烁
       (function () {

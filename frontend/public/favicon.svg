@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+     stroke-linecap="round" stroke-linejoin="round" stroke-width="2.4">
+  <!--
+    阶梯：三级递进。与登录页 / 侧边栏的 logo 同形，只做了两处 favicon 适配：
+      · 线条从 1.9 加粗到 2.4 —— 16×16 下细线会被抗锯齿糊掉
+      · 图形放大到 3~20.5，居中填满画布，标签页上不至于缩成一小撮
+    颜色跟随系统深浅色：浏览器标签栏底色是跟着系统走的，
+    写死单色的话总有一种主题下几乎看不见。
+  -->
+  <style>
+    path { stroke: #18181b }
+    @media (prefers-color-scheme: dark) { path { stroke: #fafafa } }
+  </style>
+  <path d="M3 20h5.5V14.5" />
+  <path d="M9 14.5h5.5V9" />
+  <path d="M15 9h5.5V3.5" />
+</svg>
