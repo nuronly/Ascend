@@ -21,6 +21,7 @@ import BrainPage from './pages/Brain'
 import ReviewPage from './pages/Review'
 import BadgesPage from './pages/Badges'
 import SettingsPage from './pages/Settings'
+import FeedbackPage from './pages/Feedback'
 
 function Guard({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth()
@@ -120,6 +121,7 @@ export default function App() {
                         <Route path="/brain" element={<BrainPage />} />
                         <Route path="/review" element={<ReviewPage />} />
                         <Route path="/settings" element={<SettingsPage />} />
+                        <Route path="/feedback" element={<FeedbackPage />} />
                         <Route path="*" element={<Navigate to="/" replace />} />
                       </Routes>
                     </Page>

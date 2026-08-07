@@ -298,6 +298,22 @@ export function Layout({ children }: { children: React.ReactNode }) {
             </svg>
             使用说明
           </NavLink>
+          <NavLink
+            to="/feedback"
+            state={{ from: location.pathname }}
+            className={cn(
+              'flex items-center gap-1.5 h-7 px-2.5 rounded-full',
+              'border border-[var(--border)] bg-[var(--bg-raised)]/85 backdrop-blur-sm',
+              'text-[12px] text-[var(--text-muted)]',
+              'hover:text-[var(--text)] hover:border-[var(--border-strong)] transition-colors',
+            )}
+          >
+            <svg viewBox="0 0 24 24" className="size-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M20 14.5a2 2 0 0 1-2 2H8l-4 3.5V5.5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2Z" />
+              <path d="M8.5 8.5h7M8.5 12h4.5" />
+            </svg>
+            意见反馈
+          </NavLink>
         </div>
       )}
 

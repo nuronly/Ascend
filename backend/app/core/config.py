@@ -41,6 +41,23 @@ class Settings(BaseSettings):
     # 游客账号的每日 token 额度（共享账号，烧的是所有人的份）
     guest_daily_token_quota: int = 200_000
 
+    # ── 意见反馈 ──
+    # 收件人。反馈一律先落库，邮件只是通知手段
+    feedback_email: str = "3391442399@qq.com"
+    # SMTP 不配也不影响功能：反馈照常落库，只是不发邮件
+    # （QQ 邮箱：smtp.qq.com:465，密码填「授权码」而不是登录密码）
+    smtp_host: str = ""
+    smtp_port: int = 465
+    smtp_user: str = ""
+    smtp_password: str = ""
+    # 发件地址，留空则用 smtp_user
+    smtp_from: str = ""
+    smtp_ssl: bool = True
+
+    @property
+    def smtp_ready(self) -> bool:
+        return bool(self.smtp_host and self.smtp_user and self.smtp_password)
+
     # ── 静态前端（单体部署时由后端直接提供）──
     serve_frontend: bool = False
     frontend_dist: str = ""

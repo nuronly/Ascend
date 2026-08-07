@@ -9,7 +9,7 @@ from sqlalchemy import Boolean, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
-from app.core.types import IdType, JSONType, TZDateTime, vector_column_type
+from app.core.types import IdType, JSONType, TZDateTime, utcnow, vector_column_type
 from app.models._common import pk
 
 
@@ -89,3 +89,30 @@ class BlockSearch(Base):
     content_hash: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     embedding: Mapped[Any | None] = mapped_column(vector_column_type())
     embedded_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+
+class Feedback(Base):
+    """用户意见反馈。
+
+    先落库再发邮件 —— 邮件通道随时可能不通（SMTP 没配、授权码过期、
+    QQ 邮箱风控），反馈本身不能因此丢掉。delivered_at 为空就是还没送出，
+    管理员随时可以从库里捞。
+    """
+
+    __tablename__ = "feedback"
+
+    id: Mapped[str] = pk()
+    # 允许为空：以后若在登录页也放入口，未登录也能提
+    user_id: Mapped[str | None] = mapped_column(IdType, index=True)
+    email: Mapped[str] = mapped_column(String(320), default="", nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    # 可选的回信方式；用户不留也不强求
+    contact: Mapped[str] = mapped_column(String(200), default="", nullable=False)
+    # 从哪个页面提交的，定位问题时很有用
+    page: Mapped[str] = mapped_column(String(300), default="", nullable=False)
+    user_agent: Mapped[str] = mapped_column(String(400), default="", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, default=utcnow, nullable=False)
+    delivered_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    error: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+
+    __table_args__ = (Index("ix_feedback_created", "created_at"),)

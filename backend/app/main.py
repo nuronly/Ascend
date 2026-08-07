@@ -172,6 +172,7 @@ from app.api import (  # noqa: E402
     courses,
     documents,
     export,
+    feedback,
     graph,
     guide,
     pomodoro,
@@ -191,6 +192,7 @@ for r in (
     review.router,
     badges.router,
     guide.router,
+    feedback.router,
     export.router,
 ):
     app.include_router(r, prefix="/api")

@@ -53,13 +53,14 @@ from app.models.learning import (
     ReviewLog,
     ReviewState,
 )
-from app.models.system import AICall, BlockSearch, CardSearch, LLMCache
+from app.models.system import AICall, BlockSearch, CardSearch, Feedback, LLMCache
 from app.models.user import RefreshToken, User
 
 __all__ = [
     "AICall",
     "Badge",
     "BlockSearch",
+    "Feedback",
     "COURSE_DRAFT",
     "COURSE_FAILED",
     "COURSE_OUTLINING",
