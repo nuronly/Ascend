@@ -268,6 +268,30 @@ else
   exit 1
 fi
 
+# ── 日志轮转 ─────────────────────────────────────────────────
+# server.log 是纯 append：uvicorn access log + 应用 logger（LLM 报错时的
+# traceback）全在这里，长跑会无限长大。磁盘满 → SQLite 写不进 → 服务挂。
+# 注意必须 copytruncate：systemd 持有文件 fd 持续写入，直接 mv 旧文件会让
+# 日志继续写进已删除的 inode —— 日志消失，空间还不释放。
+command -v logrotate >/dev/null 2>&1 || $INSTALL logrotate >/dev/null 2>&1 || true
+if command -v logrotate >/dev/null 2>&1; then
+  cat > /etc/logrotate.d/ladder <<EOF
+${ROOT}/backend/logs/*.log {
+    daily
+    rotate 14
+    maxsize 200M
+    compress
+    delaycompress
+    missingok
+    notifempty
+    copytruncate
+}
+EOF
+  ok "日志轮转：每日或超 200M 触发，留 14 份"
+else
+  warn "logrotate 装不上，日志会无限增长。应急截断：> $ROOT/backend/logs/server.log"
+fi
+
 # ── 7. Nginx ─────────────────────────────────────────────────
 step "7/8  配置 Nginx"
 SERVER_NAME="_"
