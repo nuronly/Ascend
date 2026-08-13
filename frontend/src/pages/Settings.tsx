@@ -89,7 +89,7 @@ export default function SettingsPage() {
 
       {/* 学习 */}
       <Section title="学习">
-        <Row label="默认番茄时长" hint="进入小节时会优先使用该节的预计时长">
+        <Row label="默认番茄时长" hint="进入小节自动起番茄时的时长，范围 5~120 分钟">
           <div className="flex items-center gap-2">
             <Input
               type="number"

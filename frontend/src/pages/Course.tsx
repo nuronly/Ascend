@@ -23,6 +23,7 @@ export default function CoursePage() {
      这里逐章推送已经定下来的标题，让等待可见、可预期。 */
   const [outlining, setOutlining] = useState(false)
   const [progress, setProgress] = useState<string[]>([])
+  const [thinking, setThinking] = useState(0)
   const started = useRef(false)
 
   useEffect(() => {
@@ -33,12 +34,15 @@ export default function CoursePage() {
     started.current = true
     setOutlining(true)
     setProgress([])
+    setThinking(0)
 
     sse(`/courses/${courseId}/outline/stream`, {
       onEvent: (ev, data) => {
         if (ev === 'progress' && data?.title) {
           setProgress((p) => (p.includes(data.title) ? p : [...p, data.title]))
         }
+        // 推理模型的思维链阶段：正文 JSON 还没开始吐，先让等待可见
+        if (ev === 'thinking') setThinking(data?.chars ?? 0)
       },
       onDone: () => {
         setOutlining(false)
@@ -57,9 +61,11 @@ export default function CoursePage() {
     started.current = false
     setOutlining(true)
     setProgress([])
+    setThinking(0)
     sse(`/courses/${courseId}/outline/stream?force=true`, {
       onEvent: (ev, data) => {
         if (ev === 'progress' && data?.title) setProgress((p) => [...p, data.title])
+        if (ev === 'thinking') setThinking(data?.chars ?? 0)
       },
       onDone: () => {
         setOutlining(false)
@@ -158,6 +164,13 @@ export default function CoursePage() {
           <p className="text-[12.5px] text-[var(--text-muted)] mt-1.5">
             这一步用的是最强的模型，大约需要一到两分钟。它在规划章节之间的递进关系。
           </p>
+          {/* 推理模型先跑思维链再吐大纲 JSON —— 思考阶段把状态亮出来，不像断了 */}
+          {thinking > 0 && progress.length === 0 && (
+            <p className="flex items-center gap-1.5 text-[12px] text-[var(--text-subtle)] mt-2.5">
+              <span className="size-1.5 rounded-full bg-[var(--accent)] animate-pulse shrink-0" />
+              AI 正在深入思考…（已推理 {thinking.toLocaleString()} 字）
+            </p>
+          )}
           {progress.length > 0 && (
             <div className="mt-4 space-y-1 max-h-[280px] overflow-y-auto">
               {progress.map((t, i) => (

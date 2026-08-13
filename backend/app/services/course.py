@@ -85,6 +85,7 @@ async def stream_outline(
 
     buf: list[str] = []
     seen_titles = 0
+    thinking_chars = 0
     try:
         async for chunk in stream_chat(
             messages,
@@ -92,11 +93,17 @@ async def stream_outline(
             tier=TIER_FLAGSHIP,  # 低频、一次性、质量决定整门课体验
             user_id=scope.user_id,
             temperature=0.6,
-            max_tokens=8000,
+            # 推理模型的思维链要占额度：8000 曾被思维链整个吃光，正文零产出
+            max_tokens=16000,
             quota=quota,
         ):
             if chunk.done:
                 break
+            # 思维链：只作为「正在思考」信号透出，不进 buf —— 混进正文会污染大纲 JSON
+            if chunk.reasoning:
+                thinking_chars += len(chunk.reasoning)
+                yield {"event": "thinking", "data": {"chars": thinking_chars}}
+                continue
             buf.append(chunk.delta)
             # 每冒出一个新标题就报一次进度 —— 用户看到大纲在长出来
             titles = _TITLE_PROBE.findall("".join(buf))
@@ -160,7 +167,7 @@ async def generate_outline(
             tier=TIER_FLAGSHIP,
             user_id=scope.user_id,
             temperature=0.6,
-            max_tokens=8000,
+            max_tokens=16000,  # 与流式版一致：给思维链留额度
             quota=quota,
         )
     except Exception as exc:
@@ -292,6 +299,7 @@ async def stream_section_content(
     buf: list[str] = []
     sent = 0
     halted = False
+    thinking_chars = 0
     try:
         async for chunk in stream_chat(
             [
@@ -302,11 +310,16 @@ async def stream_section_content(
             tier=TIER_STANDARD,  # 量大、可接受略逊；不满意可重生成
             user_id=scope.user_id,
             temperature=0.7,
-            max_tokens=8000,
+            max_tokens=16000,  # 推理模型思维链占额度，与大纲一致放宽
             quota=quota,
         ):
             if chunk.done:
                 break
+            # 思维链透出为思考信号，不进 buf —— 概念块过滤只管正文
+            if chunk.reasoning:
+                thinking_chars += len(chunk.reasoning)
+                yield {"event": "thinking", "data": {"chars": thinking_chars}}
+                continue
             buf.append(chunk.delta)
             if halted:
                 continue

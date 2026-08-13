@@ -44,6 +44,7 @@ export default function SectionPage() {
 
   const [content, setContent] = useState('')
   const [generating, setGenerating] = useState(false)
+  const [thinking, setThinking] = useState(0)
   const [adjustOpen, setAdjustOpen] = useState(false)
   const [narrowDrawer, setNarrowDrawer] = useState(false)
 
@@ -75,6 +76,7 @@ export default function SectionPage() {
 
       setGenerating(true)
       setContent('')
+      setThinking(0)
       let buf = ''
 
       const qs = new URLSearchParams()
@@ -90,6 +92,8 @@ export default function SectionPage() {
         onEvent: (ev, data) => {
           // 概念块被后端剥掉后会补发一次干净全文，用它对齐
           if (ev === 'content' && typeof data?.markdown === 'string') setContent(data.markdown)
+          // 推理模型的思维链：正文开始前的「思考中」状态
+          if (ev === 'thinking') setThinking(data?.chars ?? 0)
         },
         onDone: () => {
           setGenerating(false)
@@ -117,9 +121,9 @@ export default function SectionPage() {
     }
     loadCards(sectionId)
 
-    // 开始一节 → 自动起番茄，时长对齐该节 est_minutes（PLAN §3.3）
+    // 进入一节 → 自动起番茄；时长走后端的「用户设置 > 25 分钟」
     if (!usePomodoro.getState().active) {
-      startPomodoro(sectionId, section.est_minutes).catch(() => {})
+      startPomodoro(sectionId).catch(() => {})
     }
 
     return () => {
@@ -289,8 +293,8 @@ export default function SectionPage() {
         </Tip>
 
         {!pomodoro && (
-          <Tip label={`起一颗 ${section.est_minutes} 分钟的番茄`}>
-            <Button size="xs" variant="ghost" onClick={() => startPomodoro(sectionId, section.est_minutes)}>
+          <Tip label="开始一颗番茄钟，默认时长可在设置里调整">
+            <Button size="xs" variant="ghost" onClick={() => startPomodoro(sectionId)}>
               开始专注
             </Button>
           </Tip>
@@ -358,7 +362,9 @@ export default function SectionPage() {
                 <div className="space-y-3">
                   <div className="flex items-center gap-2 text-[13px] text-[var(--text-muted)] mb-6">
                     <Spinner className="size-3.5 text-[var(--accent)]" />
-                    正在为你写这一节…
+                    {thinking > 0
+                      ? `AI 正在思考…（已推理 ${thinking.toLocaleString()} 字）`
+                      : '正在为你写这一节…'}
                   </div>
                   {[5, 4, 5, 3, 4, 5, 2].map((w, i) => (
                     <div key={i} className="skeleton h-3.5" style={{ width: `${w * 18}%` }} />

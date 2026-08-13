@@ -161,6 +161,7 @@ class OpenAICompatProvider:
                     self._raise_for(resp, model)
 
                 first_token_seen = False
+                finish_reason = ""
                 async for line in resp.aiter_lines():
                     if not line or not line.startswith("data:"):
                         continue
@@ -181,8 +182,15 @@ class OpenAICompatProvider:
                         )
 
                     for ch in chunk.get("choices") or []:
-                        delta = (ch.get("delta") or {}).get("content")
-                        if delta:
+                        if ch.get("finish_reason"):
+                            finish_reason = ch["finish_reason"]
+                        d = ch.get("delta") or {}
+                        # 推理模型的思维链：独立透出，绝不混入 delta（正文）
+                        if reasoning := d.get("reasoning_content"):
+                            yield StreamChunk(
+                                reasoning=reasoning, model=actual_model, provider=self.name
+                            )
+                        if delta := d.get("content"):
                             if not first_token_seen:
                                 first_token_seen = True
                                 # 首 token 已到，放宽读超时给后续内容
@@ -190,6 +198,13 @@ class OpenAICompatProvider:
                             yield StreamChunk(
                                 delta=delta, model=actual_model, provider=self.name
                             )
+
+                # 思维链把 max_tokens 吃光会导致正文零产出（finish_reason=length），
+                # 留个日志，下次不用猜
+                if finish_reason == "length":
+                    log.warning(
+                        "[%s/%s] 输出被 max_tokens 截断（finish_reason=length）", self.name, model
+                    )
         except httpx.TimeoutException as exc:
             raise LLMError(
                 f"[{self.name}/{model}] 流式超时", retryable=True, provider=self.name, model=model

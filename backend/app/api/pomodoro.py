@@ -76,7 +76,11 @@ async def active(scope: Scope) -> dict | None:
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def start(body: StartIn, scope: Scope, user: CurrentUser) -> dict:
-    """开始一节 → 自动起番茄，时长对齐该节 est_minutes。"""
+    """开始一颗番茄。时长：显式传入 > 用户设置的默认时长 > 25 分钟。
+
+    不再对齐小节的 est_minutes —— AI 估的是纯阅读耗时，估不到个体差异
+    和番茄中的划词追问，作为番茄时长不准；est_minutes 仅用于界面展示。
+    """
     running = await scope.all(
         scope.select(Pomodoro).where(Pomodoro.status == POMO_RUNNING)
     )
@@ -85,9 +89,6 @@ async def start(body: StartIn, scope: Scope, user: CurrentUser) -> dict:
         p.ended_at = utcnow()
 
     minutes = body.minutes
-    if minutes is None and body.section_id:
-        section = await scope.require_section(body.section_id)
-        minutes = section.est_minutes
     if minutes is None:
         minutes = int((user.settings or {}).get("default_pomodoro_minutes") or 25)
     minutes = max(1, min(minutes, 180))

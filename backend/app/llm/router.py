@@ -467,8 +467,12 @@ async def stream_chat(
                     usage = chunk.usage or usage
                     actual_model = chunk.model or actual_model
                     break
+                # 思维链（reasoning）透传给业务层展示「正在思考」，
+                # 但不算正文产出 —— produced 只认 delta。这样「思维链跑完了、
+                # 正文被 max_tokens 截断为空」仍会触发下方的零产出降级。
                 if chunk.delta:
                     produced = True
+                if chunk.delta or chunk.reasoning:
                     yield chunk
         except LLMError as exc:
             last_err = exc
@@ -480,6 +484,25 @@ async def stream_chat(
             )
             if produced:
                 raise  # 已有产出，不能重来
+            continue
+
+        if not produced:
+            # 流正常结束但零产出：模型返回了空内容（内容审查拦截 / 供应商瞬时故障）。
+            # 一个字都没吐，换下一跳完全安全 —— 与「只在零产出时降级」的约束一致。
+            # 不拦的话空字符串会流到业务层，报出误导性的「解析失败」，还白记一条 success。
+            last_err = LLMError(
+                f"[{provider.name}/{model}] 流式返回空内容",
+                retryable=True,
+                provider=provider.name,
+                model=model,
+            )
+            log.warning("流式零产出，换下一跳：%s", last_err)
+            await _log_call(
+                user_id=user_id, scene=scene, provider=provider.name, model=actual_model, tier=tier,
+                usage=usage, cache_hit=False,
+                latency_ms=int((time.perf_counter() - t0) * 1000),
+                success=False, error="流式返回空内容", fallback_hop=hop,
+            )
             continue
 
         await _log_call(

@@ -39,7 +39,7 @@ export interface Course {
   topic: string
   title: string
   description: string
-  status: 'draft' | 'outlining' | 'ready' | 'failed' | 'archived'
+  status: 'draft' | 'outlining' | 'ready' | 'failed'
   level: 'beginner' | 'intermediate' | 'advanced'
   error: string | null
   created_at: string

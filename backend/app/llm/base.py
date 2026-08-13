@@ -45,9 +45,15 @@ class LLMResult:
 
 @dataclass(slots=True)
 class StreamChunk:
-    """流式增量。done=True 的那一条携带最终 usage。"""
+    """流式增量。done=True 的那一条携带最终 usage。
+
+    delta 与 reasoning 严格分离：delta 是正式回答，reasoning 是推理模型
+    （如 deepseek-v4-pro）的思维链。思维链只用于向前端透出「正在思考」，
+    绝不能拼进正文 —— 否则会污染大纲 JSON / 小节正文。
+    """
 
     delta: str = ""
+    reasoning: str = ""
     done: bool = False
     usage: Usage | None = None
     model: str = ""
