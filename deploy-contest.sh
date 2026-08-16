@@ -77,7 +77,7 @@ ok "后端依赖就绪"
 
 # ── 3. Node + 前端构建 ───────────────────────────────────────
 step "3/7  前端构建"
-NODE_VER="22.14.0"
+NODE_VER="v22.14.0"  # 带 v 前缀：npmmirror 的文件名是 node-v22.14.0-linux-x64.tar.xz
 node_ok() { command -v node >/dev/null 2>&1 && node -e 'process.exit(parseInt(process.version.slice(1))>=18?0:1)' 2>/dev/null; }
 if ! node_ok; then
   info "安装 Node ${NODE_VER}（npmmirror）…"
