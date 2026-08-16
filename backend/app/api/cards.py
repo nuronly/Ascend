@@ -12,7 +12,6 @@ from app.api.deps import CurrentUser, Scope, user_quota
 from app.api.sse import sse_response
 from app.core.types import new_id, utcnow
 from app.models.card import (
-    LINK_POTENTIAL,
     LINK_REAL,
     ORIGIN_MANUAL,
     ORIGIN_PARENT_ANSWER,
@@ -117,7 +116,6 @@ def card_dict(c: Card, *, with_messages: bool = True) -> dict:
         "collapsed": c.collapsed,
         "pinned": c.pinned,
         "parent_card_id": c.parent_card_id,
-        "luhmann_id": c.luhmann_id,
         "depth": c.depth,
         "pomodoro_id": c.pomodoro_id,
         "state": c.state,
@@ -222,7 +220,7 @@ async def get_card(card_id: str, scope: Scope) -> dict:
     card = await scope.require_card(card_id)
     d = card_dict(card)
     d["ancestors"] = [
-        {"id": a.id, "luhmann_id": a.luhmann_id, "selected_text": a.selected_text}
+        {"id": a.id, "selected_text": a.selected_text}
         for a in await svc.ancestors_of(scope, card)
     ]
     return d
@@ -363,18 +361,7 @@ async def vault(card_id: str, scope: Scope, user: CurrentUser) -> dict:
     card = await scope.require_card(card_id)
     await svc.to_vault(scope, card, quota=user_quota(user))
     await scope.session.refresh(card)
-    d = card_dict(card)
-    d["potential_links"] = [
-        link_dict(link)
-        for link in await scope.all(
-            scope.select(CardLink).where(
-                CardLink.from_card_id == card.id,
-                CardLink.kind == LINK_POTENTIAL,
-                CardLink.dismissed_at.is_(None),
-            )
-        )
-    ]
-    return d
+    return card_dict(card)
 
 
 @router.post("/bulk-state")
@@ -397,11 +384,11 @@ async def remove_card(card_id: str, scope: Scope) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# 链接：real / potential 两层（PLAN §1.1）
+# 链接：用户手动建立的 real link
 # ─────────────────────────────────────────────────────────────
 @router.get("/{card_id}/links")
 async def card_links(card_id: str, scope: Scope) -> dict:
-    """★ potential 只围绕当前焦点卡返回，不全局铺开 —— 否则画布变噪音。"""
+    """围绕焦点卡的连线。不再自动展示其它卡的连线 —— 否则画布变噪音。"""
     card = await scope.require_card(card_id)
     rows = await scope.all(
         scope.select(CardLink).where(
@@ -419,7 +406,7 @@ async def card_links(card_id: str, scope: Scope) -> dict:
 
 @router.post("/{card_id}/links", status_code=status.HTTP_201_CREATED)
 async def create_link(card_id: str, body: LinkIn, scope: Scope) -> dict:
-    """用户手动建立 real link。AI 永远只能产 potential。"""
+    """用户手动建立连线（real link）。"""
     if body.relation not in RELATIONS:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, f"关系类型必须是 {RELATIONS} 之一")
     card = await scope.require_card(card_id)
@@ -436,13 +423,12 @@ async def create_link(card_id: str, body: LinkIn, scope: Scope) -> dict:
         )
     )
     if existing:
+        # 已存在就更新语义；dismissed_at 置空是复活历史数据里被否掉的连线
         existing.kind = LINK_REAL
         existing.relation = body.relation
         existing.note = body.note
         existing.created_by = "user"
         existing.dismissed_at = None
-        if not existing.promoted_at:
-            existing.promoted_at = utcnow()
         await scope.commit()
         return link_dict(existing)
 
@@ -462,25 +448,11 @@ async def create_link(card_id: str, body: LinkIn, scope: Scope) -> dict:
     return link_dict(link)
 
 
-@router.post("/links/{link_id}/promote")
-async def promote_link(link_id: str, scope: Scope) -> dict:
-    """potential → real。只有用户能做这个动作（PLAN §1.1）。"""
+@router.delete("/links/{link_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_link(link_id: str, scope: Scope) -> None:
+    """删除一条连线。"""
     link = await scope.require(CardLink, link_id, "连线")
-    link.kind = LINK_REAL
-    link.promoted_at = utcnow()
-    link.dismissed_at = None
-    await scope.commit()
-    return link_dict(link)
-
-
-@router.post("/links/{link_id}/dismiss", status_code=status.HTTP_204_NO_CONTENT)
-async def dismiss_link(link_id: str, scope: Scope) -> None:
-    """否掉一条 potential，此后不再推荐。"""
-    link = await scope.require(CardLink, link_id, "连线")
-    if link.kind == LINK_REAL:
-        await scope.session.delete(link)
-    else:
-        link.dismissed_at = utcnow()
+    await scope.session.delete(link)
     await scope.commit()
 
 

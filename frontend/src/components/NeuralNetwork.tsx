@@ -195,11 +195,9 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
         ctx.globalAlpha = lit * 0.5
         ctx.lineWidth = 0.8 + lit * 1.4
       } else {
-        ctx.strokeStyle =
-          e.kind === 'real' ? P.edgeReal : e.kind === 'parent' ? P.edgeParent : P.edgePotential
+        ctx.strokeStyle = e.kind === 'real' ? P.edgeReal : P.edgeParent
         ctx.globalAlpha = 1
-        ctx.lineWidth = e.kind === 'parent' ? 0.9 : e.kind === 'real' ? 1.1 : 0.7
-        if (e.kind === 'potential') ctx.setLineDash([3, 4])
+        ctx.lineWidth = e.kind === 'parent' ? 0.9 : 1.1
       }
       ctx.stroke()
       ctx.setLineDash([])
@@ -437,9 +435,6 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
           }}
         >
           <div className="flex items-center gap-1.5">
-            <span className="font-mono text-[9.5px] text-[var(--text-subtle)]">
-              {hovered.body.luhmann_id}
-            </span>
             <span className="text-[12px] font-medium text-[var(--text)] truncate">
               ⟨{hovered.body.term || hovered.body.label}⟩
             </span>

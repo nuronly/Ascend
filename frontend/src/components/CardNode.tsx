@@ -256,9 +256,6 @@ export const CardNode = memo(function CardNode({ data }: NodeProps) {
       >
         <Handle type="target" position={Position.Left} />
         <Handle type="source" position={Position.Right} />
-        <span className="font-mono text-[10px] text-[var(--text-subtle)] shrink-0">
-          {card.luhmann_id}
-        </span>
         <span className="text-[12.5px] font-medium truncate grow">
           {card.selected_text || truncate(card.question, 24)}
         </span>
@@ -295,12 +292,14 @@ export const CardNode = memo(function CardNode({ data }: NodeProps) {
         <span className="text-[12.5px] font-semibold text-[var(--accent)] truncate grow min-w-0">
           ⟨{truncate(card.selected_text || card.question, 22)}⟩
         </span>
-        <span
-          className="font-mono text-[10px] text-[var(--text-subtle)] shrink-0 tabular-nums"
-          title={`Luhmann 编号 · 长度即深度（第 ${card.depth + 1} 层）`}
-        >
-          {card.luhmann_id}
-        </span>
+        {card.depth > 0 && (
+          <span
+            className="font-mono text-[10px] text-[var(--text-subtle)] shrink-0 tabular-nums"
+            title="追问链深度"
+          >
+            L{card.depth + 1}
+          </span>
+        )}
         {isVault && (
           <span className="size-1.5 rounded-full bg-[var(--sem-ok)] shrink-0" title="已收进仓库" />
         )}

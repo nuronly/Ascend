@@ -19,7 +19,6 @@ export interface SectionBrief {
   idx: number
   title: string
   summary: string
-  est_minutes: number
   content_status: 'pending' | 'generating' | 'ready' | 'failed'
   key_concepts: string[]
   completed: boolean
@@ -44,14 +43,13 @@ export interface Course {
   error: string | null
   created_at: string
   chapters: ChapterBrief[]
-  stats: { sections?: number; completed?: number; est_minutes?: number; cards?: number }
+  stats: { sections?: number; completed?: number; cards?: number }
 }
 
 export interface SectionDetail {
   id: string
   title: string
   summary: string
-  est_minutes: number
   content_md: string | null
   content_status: SectionBrief['content_status']
   key_concepts: string[]
@@ -102,7 +100,6 @@ export interface Card {
   collapsed: boolean
   pinned: boolean
   parent_card_id: string | null
-  luhmann_id: string
   depth: number
   pomodoro_id: string | null
   state: CardState
@@ -115,8 +112,8 @@ export interface Card {
   due_date?: string
 }
 
-/** real / potential 两层分离（PLAN §1.1） */
-export type LinkKind = 'real' | 'potential'
+/** 只保留 real：AI 建议（potential）机制已下线 */
+export type LinkKind = 'real'
 export type Relation = 'continuation' | 'contrast' | 'evidence' | 'consequence' | 'tension'
 
 export interface CardLink {
@@ -126,9 +123,7 @@ export interface CardLink {
   kind: LinkKind
   relation: Relation
   note: string
-  confidence: number | null
   created_by: 'user' | 'ai'
-  promoted_at: string | null
 }
 
 export interface Pomodoro {
@@ -174,7 +169,6 @@ export interface OverlayData {
 export interface CardGraphNode {
   id: string
   label: string
-  luhmann_id: string
   depth: number
   is_rewritten: boolean
   state: CardState
@@ -191,7 +185,6 @@ export interface Citation {
   selected_text: string
   is_rewritten: boolean
   created_at: string
-  luhmann_id: string
   origin: { section_id?: string; section_title?: string; course_id?: string; course_title?: string }
 }
 

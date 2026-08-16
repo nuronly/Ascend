@@ -224,9 +224,6 @@ export default function VaultPage() {
                   )}
                 >
                   <div className="flex items-center gap-1.5">
-                    <span className="font-mono text-[10px] text-[var(--text-subtle)] tabular-nums shrink-0">
-                      {c.luhmann_id}
-                    </span>
                     <span className="text-[13.5px] font-medium text-[var(--accent)] truncate">
                       ⟨{c.selected_text || truncate(c.question, 20)}⟩
                     </span>
@@ -292,8 +289,6 @@ export default function VaultPage() {
         subtitle={
           detail && (
             <span className="flex flex-wrap items-center gap-2">
-              <span className="font-mono">{detail.luhmann_id}</span>
-              <span className="opacity-40">·</span>
               <span>{relativeTime(detail.created_at)}</span>
               {detail.origin_info?.section_title && (
                 <>

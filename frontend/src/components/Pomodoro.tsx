@@ -244,9 +244,6 @@ export function PomodoroReview() {
                 </span>
                 <div className="min-w-0 grow">
                   <div className="flex items-center gap-1.5">
-                    <span className="font-mono text-[10px] text-[var(--text-subtle)]">
-                      {c.luhmann_id}
-                    </span>
                     <span className="text-[13px] font-medium text-[var(--accent)] truncate">
                       ⟨{c.selected_text}⟩
                     </span>

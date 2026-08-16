@@ -40,7 +40,6 @@ class SectionOut(BaseModel):
     idx: int
     title: str
     summary: str
-    est_minutes: int
     content_status: str
     key_concepts: list[Any] = []
     completed: bool = False
@@ -71,7 +70,6 @@ class CourseOut(BaseModel):
 class UpdateSectionIn(BaseModel):
     title: str | None = Field(default=None, max_length=500)
     summary: str | None = Field(default=None, max_length=2000)
-    est_minutes: int | None = Field(default=None, ge=5, le=120)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -101,12 +99,11 @@ async def _course_full(scope: Scope, c: Course) -> CourseOut:
     )
 
     chapters: list[ChapterOut] = []
-    total = done = minutes = 0
+    total = done = 0
     for ch in c.chapters:
         secs: list[SectionOut] = []
         for s in ch.sections:
             total += 1
-            minutes += s.est_minutes
             if s.completed_at:
                 done += 1
             secs.append(
@@ -115,7 +112,6 @@ async def _course_full(scope: Scope, c: Course) -> CourseOut:
                     idx=s.idx,
                     title=s.title,
                     summary=s.summary,
-                    est_minutes=s.est_minutes,
                     content_status=s.content_status,
                     key_concepts=list(s.key_concepts or []),
                     completed=s.completed_at is not None,
@@ -132,7 +128,6 @@ async def _course_full(scope: Scope, c: Course) -> CourseOut:
         stats={
             "sections": total,
             "completed": done,
-            "est_minutes": minutes,
             "cards": sum(counts.get(s.id, 0) for ch in c.chapters for s in ch.sections),
         },
     )
@@ -270,7 +265,6 @@ async def get_section(course_id: str, section_id: str, scope: Scope) -> dict:
         "id": section.id,
         "title": section.title,
         "summary": section.summary,
-        "est_minutes": section.est_minutes,
         "content_md": section.content_md,
         "content_status": section.content_status,
         "key_concepts": list(section.key_concepts or []),

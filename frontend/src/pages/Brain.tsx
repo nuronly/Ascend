@@ -497,8 +497,6 @@ export default function BrainPage() {
         subtitle={
           detail && (
             <span className="flex items-center gap-2">
-              <span className="font-mono">{detail.luhmann_id}</span>
-              <span className="opacity-40">·</span>
               <span>{relativeTime(detail.created_at)}</span>
               {detail.is_rewritten && (
                 <Badge tone="rewritten" className="ml-1">

@@ -25,7 +25,7 @@ export type GraphView = 'overlay' | 'concepts' | 'cards'
  * 参与分层计算的「骨架边」：只有带方向的关系能定义"谁在上、谁在前"。
  *
  * related / contrast 无向，不在此列；它们靠布局后的 alignFlatOnly() 归位。
- * 问题图则刻意排除 real / potential —— 它们是跨追问树的意外关联，
+ * 问题图则刻意排除 real link —— 它们是跨追问树的意外关联，
  * 一旦参与布局就会把本来独立的几棵树互相拽偏，毁掉森林的清爽结构。
  */
 export const SKELETON: Record<GraphView, string> = {

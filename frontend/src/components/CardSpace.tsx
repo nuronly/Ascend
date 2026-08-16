@@ -97,7 +97,7 @@ function layout(cards: Card[]): Map<string, { x: number; y: number }> {
   return pos
 }
 
-function buildEdges(cards: Card[], links: CardLink[], focusId: string | null): Edge[] {
+function buildEdges(cards: Card[], links: CardLink[]): Edge[] {
   const ids = new Set(cards.map((c) => c.id))
   const edges: Edge[] = []
 
@@ -120,28 +120,19 @@ function buildEdges(cards: Card[], links: CardLink[], focusId: string | null): E
 
   for (const l of links) {
     if (!ids.has(l.from_card_id) || !ids.has(l.to_card_id)) continue
+    // 只画用户手建的 real link；历史数据里的 potential 建议不再渲染
+    if (l.kind !== 'real') continue
 
-    // ★ potential 只围绕当前焦点卡显示，不全局铺开（Folium 的关键约束）
-    //   否则画布很快变成噪音网 —— PLAN §7 风险 #3
-    if (l.kind === 'potential') {
-      if (!focusId || (l.from_card_id !== focusId && l.to_card_id !== focusId)) continue
-    }
-
-    const isReal = l.kind === 'real'
     edges.push({
       id: `l-${l.id}`,
       source: l.from_card_id,
       target: l.to_card_id,
       type: 'straight',
-      label: isReal ? undefined : `可能相关 ${Math.round((l.confidence ?? 0) * 100)}%`,
-      labelStyle: { fill: 'var(--text-subtle)', fontSize: 10 },
-      labelBgStyle: { fill: 'var(--bg)', fillOpacity: 0.9 },
       style: {
-        // real link 用暖调琥珀（借 Folium）；potential 冷灰虚线，视觉上就要弱
-        stroke: isReal ? RELATION_COLORS[l.relation] ?? 'var(--sem-real)' : 'var(--sem-potential)',
-        strokeWidth: isReal ? 1.8 : 1.2,
-        strokeDasharray: isReal ? undefined : '4 4',
-        opacity: isReal ? 0.95 : 0.6,
+        // real link 用暖调琥珀（借 Folium），颜色随语义关系区分
+        stroke: RELATION_COLORS[l.relation] ?? 'var(--sem-real)',
+        strokeWidth: 1.8,
+        opacity: 0.95,
       },
       data: { linkId: l.id, kind: l.kind },
     })
@@ -152,7 +143,6 @@ function buildEdges(cards: Card[], links: CardLink[], focusId: string | null): E
 function Canvas({ className }: { className?: string }) {
   const cards = useCardSpace((s) => s.cards)
   const links = useCardSpace((s) => s.links)
-  const focusId = useCardSpace((s) => s.focusCardId)
   const moveCard = useCardSpace((s) => s.moveCard)
   const linkCards = useCardSpace((s) => s.linkCards)
   const { fitView, setCenter } = useReactFlow()
@@ -219,7 +209,7 @@ function Canvas({ className }: { className?: string }) {
     })
   }, [cards, auto])
 
-  const edges = useMemo(() => buildEdges(cards, links, focusId), [cards, links, focusId])
+  const edges = useMemo(() => buildEdges(cards, links), [cards, links])
 
   const onNodesChange = useCallback(
     (changes: NodeChange[]) => {

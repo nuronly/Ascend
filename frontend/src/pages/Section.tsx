@@ -319,8 +319,6 @@ export default function SectionPage() {
               <span className="font-mono tabular-nums">
                 {section.chapter.idx + 1}.{section.nav.index}
               </span>
-              <span className="opacity-40">·</span>
-              <span>{section.est_minutes} 分钟</span>
               {rootCount > 0 && (
                 <>
                   <span className="opacity-40">·</span>

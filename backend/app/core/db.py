@@ -103,10 +103,25 @@ async def _migrate_light(conn) -> None:
                 text("ALTER TABLE users ADD COLUMN is_guest BOOLEAN NOT NULL DEFAULT 0")
             )
             log.info("迁移：users 表补充 is_guest 列")
+
+        # est_minutes 已废弃（AI 估不准个体阅读耗时）。
+        # SQLite 3.35+ 原生支持 DROP COLUMN，无需重建表
+        rows = (await conn.execute(text("PRAGMA table_info(sections)"))).all()
+        if "est_minutes" in {r[1] for r in rows}:
+            await conn.execute(text("ALTER TABLE sections DROP COLUMN est_minutes"))
+            log.info("迁移：sections 表删除 est_minutes 列")
+
+        # luhmann_id 已废弃：parent_card_id + depth 已完整表达追问树
+        rows = (await conn.execute(text("PRAGMA table_info(cards)"))).all()
+        if "luhmann_id" in {r[1] for r in rows}:
+            await conn.execute(text("ALTER TABLE cards DROP COLUMN luhmann_id"))
+            log.info("迁移：cards 表删除 luhmann_id 列")
     else:  # pragma: no cover
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE")
         )
+        await conn.execute(text("ALTER TABLE sections DROP COLUMN IF EXISTS est_minutes"))
+        await conn.execute(text("ALTER TABLE cards DROP COLUMN IF EXISTS luhmann_id"))
 
 
 async def _sqlite_checkpoint() -> None:

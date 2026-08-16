@@ -101,10 +101,6 @@ def main() -> int:
     print(f"     《{course['title']}》 {n_ch} 章 {n_sec} 节 · {time.time() - t0:.1f}s")
     check("章节数在 4~8（PLAN §3.1 约束）", 4 <= n_ch <= 8, f"实际 {n_ch}")
     check("每章 3~6 节", all(3 <= len(c["sections"]) <= 6 for c in course["chapters"]))
-    check("大纲带时长估计", all(
-        s["est_minutes"] > 0 for c in course["chapters"] for s in c["sections"]))
-    check("时长不是一律 25（真实估计）", len({
-        s["est_minutes"] for c in course["chapters"] for s in c["sections"]}) > 1)
     check("小节带 key_concepts（供图谱抽取）", any(
         s["key_concepts"] for c in course["chapters"] for s in c["sections"]))
     check("正文默认未生成（懒生成）", all(
@@ -117,7 +113,7 @@ def main() -> int:
     r = a.post("/pomodoros", json={"section_id": section_id})
     check("番茄启动", r.status_code == 201, r.text[:150])
     pomo = r.json()
-    check("时长对齐小节 est_minutes", pomo["planned_minutes"] > 0,
+    check("时长取用户默认设置", pomo["planned_minutes"] > 0,
           f"{pomo['planned_minutes']} 分钟")
     check("返回绝对时间戳而非倒计时数字",
           all(k in pomo for k in ("started_at", "expected_end", "server_now")))
@@ -161,7 +157,6 @@ def main() -> int:
     check("① 原文划词 → 根卡", r.status_code == 201, r.text[:200])
     c1 = r.json()
     check("根卡 parent 为空", c1["parent_card_id"] is None)
-    check("Luhmann 编号已分配", c1["luhmann_id"] != "", f"编号 {c1['luhmann_id']}")
     check("自动关联当前番茄", c1["pomodoro_id"] == pomo["id"])
     check("初始状态为 draft", c1["state"] == "draft")
 
@@ -186,8 +181,6 @@ def main() -> int:
     c2 = r.json()
     check("子卡 parent 指向父卡", c2["parent_card_id"] == c1["id"])
     check("深度 +1", c2["depth"] == 1)
-    check("编号体现层级（1 → 1a）", len(c2["luhmann_id"]) > len(c1["luhmann_id"]),
-          f"{c1['luhmann_id']} → {c2['luhmann_id']}")
     check("记录了在哪条回答的哪个偏移划的", c2["origin_message_id"] == msg_id
           and c2["origin_offset"].get("start") == at)
 
@@ -203,7 +196,7 @@ def main() -> int:
     })
     check("③ 己见里划词 → 子卡", r.status_code == 201)
     c3 = r.json()
-    check("三层套娃成链", c3["depth"] == 2, f"深度 {c3['depth']}，编号 {c3['luhmann_id']}")
+    check("三层套娃成链", c3["depth"] == 2, f"深度 {c3['depth']}")
     sse(a, "POST", f"/cards/{c3['id']}/ask", json={"question": "归一化具体指什么？"})
 
     # ★ 铁律 #2/#3：多卡同屏 + 父子连线
@@ -238,20 +231,16 @@ def main() -> int:
     a.post(f"/cards/{c2['id']}/vault")
     a.post(f"/cards/{c3['id']}/vault")
 
-    # ── 7. real / potential 两层链接 ──
-    section("7. Folium 借鉴 · real / potential 两层分离")
+    # ── 7. 手动连线 ──
+    section("7. 卡片连线 · 只由用户手建")
     r = a.post(f"/cards/{c1['id']}/links",
                json={"to_card_id": c3["id"], "relation": "evidence", "note": "手动建立"})
     check("用户手建 real link", r.status_code == 201 and r.json()["kind"] == "real")
     link_id = r.json()["id"]
     r = a.get(f"/cards/{c1['id']}/links")
     links = r.json()["links"]
-    check("potential 只围绕焦点卡返回（不全局铺开）", isinstance(links, list),
+    check("焦点卡连线可列出", isinstance(links, list) and len(links) >= 1,
           f"{len(links)} 条")
-    pots = [x for x in links if x["kind"] == "potential"]
-    check("AI 只产 potential，不直接写 real",
-          all(x["created_by"] == "ai" for x in pots) if pots else True,
-          f"{len(pots)} 条 potential")
 
     # ── 8. 检索与第二大脑 ──
     section("8. 第二大脑 · GraphRAG-lite 多路召回")
@@ -303,7 +292,7 @@ def main() -> int:
         ("读他人卡片连线", lambda: b.get(f"/cards/{c1['id']}/links")),
         ("结束他人番茄", lambda: b.post(f"/pomodoros/{pomo['id']}/finish")),
         ("延长他人番茄", lambda: b.post(f"/pomodoros/{pomo['id']}/extend")),
-        ("提升他人连线", lambda: b.post(f"/cards/links/{link_id}/promote")),
+        ("删他人连线", lambda: b.delete(f"/cards/links/{link_id}")),
         ("导出时不含他人数据", lambda: b.get("/export/json")),
         ("读他人概念图", lambda: b.get(f"/graph/concepts?course_id={course_id}")),
         ("叠加视图越权", lambda: b.get(f"/graph/overlay?course_id={course_id}")),

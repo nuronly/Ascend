@@ -65,7 +65,6 @@ async def export_json(scope: Scope) -> Response:
                                 "idx": s.idx,
                                 "title": s.title,
                                 "summary": s.summary,
-                                "est_minutes": s.est_minutes,
                                 "key_concepts": list(s.key_concepts or []),
                                 "content_md": s.content_md,
                                 "completed_at": (
@@ -87,7 +86,6 @@ async def export_json(scope: Scope) -> Response:
         "cards": [
             {
                 "id": c.id,
-                "luhmann_id": c.luhmann_id,
                 "depth": c.depth,
                 "parent_card_id": c.parent_card_id,
                 "question": c.question,
@@ -169,14 +167,36 @@ def _slug(text: str, fallback: str = "untitled") -> str:
     return (keep[:60] or fallback).replace("/", "-")
 
 
+def _tree_order(cards: list[Card]) -> list[Card]:
+    """前序遍历：根卡按创建时间排，子卡紧随父卡 —— 追问链在导出里保持相邻。"""
+    children: dict[str | None, list[Card]] = {}
+    for c in cards:
+        children.setdefault(c.parent_card_id, []).append(c)
+    for sibs in children.values():
+        sibs.sort(key=lambda c: c.created_at)
+    out: list[Card] = []
+
+    def walk(c: Card) -> None:
+        out.append(c)
+        for kid in children.get(c.id, []):
+            walk(kid)
+
+    for root in children.get(None, []):
+        walk(root)
+    # 防御：父卡不在本次导出里（如被排除的 draft）的孤儿卡，按时间补在末尾
+    seen = {c.id for c in out}
+    out.extend(c for c in cards if c.id not in seen)
+    return out
+
+
 @router.get("/markdown")
 async def export_markdown(scope: Scope, include_drafts: bool = Query(False)) -> StreamingResponse:
     """Markdown 打包导出。
 
-    卡片按 Luhmann 编号命名，双链写成 `[[编号]]` —— 直接扔进
-    Obsidian / Folium 就能用，不需要任何转换脚本。
+    卡片文件名 = 标题 + id 短码（防重名），双链写成 `[[文件名]]` ——
+    直接扔进 Obsidian 就能用，不需要任何转换脚本。
     """
-    stmt = scope.select(Card).order_by(Card.luhmann_id)
+    stmt = scope.select(Card).order_by(Card.created_at)
     if not include_drafts:
         stmt = stmt.where(Card.state != STATE_ARCHIVED)
     cards = await scope.all(stmt)
@@ -189,6 +209,11 @@ async def export_markdown(scope: Scope, include_drafts: bool = Query(False)) -> 
         if a and b:
             outgoing.setdefault(a.id, []).append((b, link))
             outgoing.setdefault(b.id, []).append((a, link))
+
+    # 先统一算好文件名，双链才能指向正确的目标
+    name_of = {
+        c.id: _slug(f"{c.selected_text or c.question[:30]}-{c.id[:8]}", c.id) for c in cards
+    }
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -214,7 +239,7 @@ async def export_markdown(scope: Scope, include_drafts: bool = Query(False)) -> 
         for c in cards:
             fm = [
                 "---",
-                f"id: {c.luhmann_id or c.id}",
+                f"id: {c.id}",
                 f"created: {c.created_at.isoformat()}",
                 f"state: {c.state}",
                 f"depth: {c.depth}",
@@ -226,7 +251,7 @@ async def export_markdown(scope: Scope, include_drafts: bool = Query(False)) -> 
 
             body = [
                 "",
-                f"# {c.luhmann_id} {c.selected_text or c.question[:40]}",
+                f"# {c.selected_text or c.question[:40]}",
                 "",
             ]
             if c.context_text:
@@ -242,23 +267,23 @@ async def export_markdown(scope: Scope, include_drafts: bool = Query(False)) -> 
                     mark = "→" if link.kind == "real" else "~"
                     note = f" — {link.note}" if link.note else ""
                     body.append(
-                        f"- {mark} [[{peer.luhmann_id or peer.id}]] "
+                        f"- {mark} [[{name_of[peer.id]}]] "
                         f"（{link.relation}{note}）"
                     )
                 body.append("")
 
             if parent := by_id.get(c.parent_card_id or ""):
-                body += [f"父卡：[[{parent.luhmann_id or parent.id}]]", ""]
+                body += [f"父卡：[[{name_of[parent.id]}]]", ""]
 
-            name = _slug(f"{c.luhmann_id} {c.selected_text or c.question[:30]}", c.id)
-            zf.writestr(f"cards/{name}.md", "\n".join(fm + body))
+            zf.writestr(f"cards/{name_of[c.id]}.md", "\n".join(fm + body))
 
-        # ── 索引 ──
+        # ── 索引（树序：追问链相邻）──
         idx = ["# 卡片索引", ""]
-        for c in sorted(cards, key=lambda x: (x.luhmann_id or "", x.created_at)):
+        for c in _tree_order(cards):
             flag = " ★" if c.is_rewritten else ""
+            indent = "  " * min(c.depth, 6)
             idx.append(
-                f"- `{c.luhmann_id}` [[{c.luhmann_id or c.id}]] "
+                f"{indent}- [[{name_of[c.id]}]] "
                 f"{c.summary or c.selected_text}{flag}"
             )
         zf.writestr("INDEX.md", "\n".join(idx))
@@ -267,9 +292,9 @@ async def export_markdown(scope: Scope, include_drafts: bool = Query(False)) -> 
             "# 阶梯计划 · 数据导出\n\n"
             f"导出时间：{utcnow().isoformat()}\n\n"
             "- `courses/` 课程正文\n"
-            "- `cards/` 卡片，文件名前缀是 Luhmann 编号\n"
-            "- `INDEX.md` 全部卡片索引，★ 表示写过己见的卡\n\n"
-            "卡片间的双链写作 `[[编号]]`，可直接导入 Obsidian 等工具。\n",
+            "- `cards/` 卡片，文件名 = 标题 + id 短码\n"
+            "- `INDEX.md` 全部卡片索引（缩进体现追问层级），★ 表示写过己见的卡\n\n"
+            "卡片间的双链写作 `[[文件名]]`，可直接导入 Obsidian 等工具。\n",
         )
 
     buf.seek(0)

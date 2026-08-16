@@ -18,7 +18,6 @@ from app.core.scope import UserScope
 from app.core.types import new_id, utcnow
 from app.llm import Message, chat_json, stream_chat
 from app.models.card import (
-    LINK_POTENTIAL,
     ORIGIN_PARENT_ANSWER,
     ORIGIN_PARENT_NOTE,
     ORIGIN_SOURCE_TEXT,
@@ -31,7 +30,7 @@ from app.models.card import (
 from app.models.graph import CardConcept, Concept
 from app.models.learning import POMO_RUNNING, Pomodoro
 from app.models.system import CardSearch
-from app.search.fts import delete_card_fts, search_cards_fts, upsert_card_fts
+from app.search.fts import delete_card_fts, upsert_card_fts
 from app.search.tokenize import to_index_text
 from app.services import prompts
 
@@ -42,24 +41,6 @@ DEPTH_HINT_THRESHOLD = 4
 
 # 画布自动布局的基准间距
 CARD_W, CARD_GAP_X, CARD_GAP_Y, ROOT_GAP_Y = 340.0, 380.0, 150.0, 420.0
-
-
-# ─────────────────────────────────────────────────────────────
-# Luhmann 编号：1 / 1a / 1a1 / 1a1b（PLAN §1.4）
-# ─────────────────────────────────────────────────────────────
-def _alpha(n: int) -> str:
-    """1→a, 26→z, 27→aa"""
-    s = ""
-    while n > 0:
-        n, r = divmod(n - 1, 26)
-        s = chr(97 + r) + s
-    return s
-
-
-def next_luhmann(parent_luhmann: str | None, sibling_index: int, depth: int) -> str:
-    """奇数层用字母、偶数层用数字，交替下去，编号长度即深度。"""
-    seg = _alpha(sibling_index + 1) if depth % 2 == 1 else str(sibling_index + 1)
-    return f"{parent_luhmann or ''}{seg}"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -148,7 +129,6 @@ async def create_card(
         canvas_x=x,
         canvas_y=y,
         parent_card_id=parent_card_id,
-        luhmann_id=next_luhmann(parent.luhmann_id if parent else None, idx, depth),
         depth=depth,
         pomodoro_id=await _active_pomodoro_id(scope),
         state=STATE_DRAFT,
@@ -363,65 +343,6 @@ async def _link_concepts(scope: UserScope, card: Card, tags: list[str]) -> None:
     await scope.commit()
 
 
-async def suggest_potential_links(scope: UserScope, card: Card, limit: int = 5) -> list[CardLink]:
-    """★ AI 只能产生 potential，用户点"提升"才变成 real link（PLAN §1.1）。
-
-    不这么做，图很快会变成噪音网 —— 这是 PLAN §7 风险 #3。
-    另外 Folium 有条同样重要的约束：potential 只围绕焦点卡显示，不全局铺开。
-    """
-    probe = " ".join(
-        filter(None, [card.selected_text, card.summary, *(card.concept_tags or [])])
-    )
-    if not probe.strip():
-        return []
-
-    hits = await search_cards_fts(scope.session, scope.user_id, probe, limit=limit * 4)
-    exclude = {card.id, card.parent_card_id}
-    exclude |= {c.id for c in await ancestors_of(scope, card)}
-    exclude |= set(
-        await scope.session.scalars(
-            select(Card.id).where(Card.parent_card_id == card.id)
-        )
-    )
-
-    # 已存在的边（含被用户否掉的）不再重复建议
-    existing = set(
-        await scope.session.scalars(
-            scope.select(CardLink, CardLink.to_card_id).where(CardLink.from_card_id == card.id)
-        )
-    ) | set(
-        await scope.session.scalars(
-            scope.select(CardLink, CardLink.from_card_id).where(CardLink.to_card_id == card.id)
-        )
-    )
-
-    created: list[CardLink] = []
-    top = max((s for _, s in hits), default=1.0) or 1.0
-    for cid, score in hits:
-        if cid in exclude or cid in existing or len(created) >= limit:
-            continue
-        other = await scope.get(Card, cid)
-        if other is None or other.state != STATE_VAULT:
-            continue
-        link = CardLink(
-            id=new_id(),
-            user_id=scope.user_id,
-            from_card_id=card.id,
-            to_card_id=cid,
-            kind=LINK_POTENTIAL,
-            relation="related",
-            confidence=round(min(score / top, 1.0), 3),
-            created_by="ai",
-            created_at=utcnow(),
-        )
-        scope.add(link)
-        created.append(link)
-
-    if created:
-        await scope.commit()
-    return created
-
-
 async def index_card(scope: UserScope, card: Card) -> None:
     """写入检索索引。jieba 分词后再入库（PLAN §3.6）。"""
     text = "\n".join(
@@ -478,8 +399,6 @@ async def to_vault(scope: UserScope, card: Card, *, quota: int | None = None) ->
         await embed_card(scope, card)
     except Exception:
         log.warning("卡片向量化失败（其它召回路不受影响）", exc_info=True)
-
-    await suggest_potential_links(scope, card)
 
     from app.services.review import ensure_review_state
 

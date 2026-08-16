@@ -32,13 +32,6 @@ export function mmss(totalSeconds: number): string {
   return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 }
 
-export function humanMinutes(min: number): string {
-  if (min < 60) return `${min} 分钟`
-  const h = Math.floor(min / 60)
-  const m = min % 60
-  return m ? `${h} 小时 ${m} 分` : `${h} 小时`
-}
-
 export function debounce<T extends (...args: any[]) => void>(fn: T, ms: number) {
   let t: ReturnType<typeof setTimeout> | undefined
   const wrapped = (...args: Parameters<T>) => {

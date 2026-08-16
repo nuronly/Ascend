@@ -352,7 +352,6 @@ async def answer_stream(
             "selected_text": c.selected_text,
             "is_rewritten": c.is_rewritten,
             "created_at": c.created_at.isoformat(),
-            "luhmann_id": c.luhmann_id,
             "origin": origins.get(c.source_section_id or "", {}),
         }
         for c in picked
@@ -519,7 +518,6 @@ async def memory_network(scope: UserScope, limit: int = 800) -> dict:
                 "label": c.summary or c.selected_text or c.question[:30],
                 "term": c.selected_text,
                 "depth": c.depth,
-                "luhmann_id": c.luhmann_id,
                 "rewritten": c.is_rewritten,
                 "touch": c.touch_count,
                 "degree": degree.get(c.id, 0),

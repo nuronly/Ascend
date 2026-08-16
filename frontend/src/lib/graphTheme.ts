@@ -33,7 +33,6 @@ export interface GraphPalette {
   contrast: string
   parent: string
   real: string
-  potential: string
   selected: string
   hoverRing: string
 }
@@ -65,7 +64,6 @@ export const LIGHT: GraphPalette = {
   contrast: '#d8b4fe',
   parent: '#c3cbd6',
   real: '#f59e0b',
-  potential: '#dde3ea',
   selected: '#2563eb',
   hoverRing: '#3b82f6',
 }
@@ -87,7 +85,6 @@ export const DARK: GraphPalette = {
   contrast: '#a874c9',
   parent: '#5b6577',
   real: '#d69a4a',
-  potential: '#4a5160',
   selected: '#7fa8ff',
   hoverRing: '#8ab4ff',
 }
@@ -226,19 +223,6 @@ export function makeStylesheet(p: GraphPalette): cytoscape.StylesheetJson {
         width: 2,
         'curve-style': 'unbundled-bezier',
         'control-point-distance': 68,
-        'control-point-weight': 0.5,
-      } as never,
-    },
-    // potential：AI 猜的，"是问题不是事实"，视觉上就该弱
-    {
-      selector: 'edge.potential',
-      style: {
-        'line-color': p.potential,
-        'line-style': 'dashed',
-        width: 1.2,
-        opacity: 0.75,
-        'curve-style': 'unbundled-bezier',
-        'control-point-distance': 52,
         'control-point-weight': 0.5,
       } as never,
     },

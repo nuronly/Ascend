@@ -5,7 +5,7 @@ import { api, sse } from '@/lib/api'
 import type { Course } from '@/lib/types'
 import { LEVEL_LABELS } from '@/lib/types'
 import { Badge, Button, Progress, Spinner } from '@/components/ui'
-import { cn, humanMinutes } from '@/lib/utils'
+import { cn } from '@/lib/utils'
 import { toast } from '@/lib/store'
 
 export default function CoursePage() {
@@ -126,7 +126,6 @@ export default function CoursePage() {
             {total > 0 && (
               <>
                 <Badge>{total} 节</Badge>
-                <Badge>{humanMinutes(course.stats.est_minutes ?? 0)}</Badge>
                 {!!course.stats.cards && <Badge tone="accent">{course.stats.cards} 张卡</Badge>}
               </>
             )}
@@ -260,9 +259,6 @@ export default function CoursePage() {
                         </div>
                       )}
                     </div>
-                    <span className="text-[11.5px] text-[var(--text-subtle)] tabular-nums shrink-0 mt-0.5">
-                      {s.est_minutes}′
-                    </span>
                   </button>
                 ))}
               </div>

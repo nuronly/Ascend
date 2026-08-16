@@ -209,10 +209,6 @@ async def _persist_outline(scope: UserScope, course: Course, data: dict) -> Cour
         # sections 有指向 chapters 的外键，先 flush 保证插入顺序
         await scope.flush()
         for si, sec in enumerate(ch.get("sections") or []):
-            try:
-                est = int(sec.get("est_minutes") or 25)
-            except (TypeError, ValueError):
-                est = 25
             scope.add(
                 Section(
                     id=new_id(),
@@ -220,7 +216,6 @@ async def _persist_outline(scope: UserScope, course: Course, data: dict) -> Cour
                     idx=si,
                     title=(sec.get("title") or f"{ci + 1}.{si + 1}").strip()[:500],
                     summary=(sec.get("summary") or "").strip(),
-                    est_minutes=max(5, min(est, 90)),
                     key_concepts=[str(k) for k in (sec.get("key_concepts") or [])][:8],
                     prerequisite_ids=[str(k) for k in (sec.get("prerequisite_ids") or [])][:8],
                 )
@@ -283,7 +278,6 @@ async def stream_section_content(
         chapter_title=chapter.title,
         section_title=section.title,
         section_summary=section.summary,
-        est_minutes=section.est_minutes,
         level=course.level,
         prev_titles=prev,
         key_concepts=list(section.key_concepts or []),

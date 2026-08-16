@@ -200,9 +200,6 @@ export default function ReviewPage() {
               {/* 题目 */}
               <div className="px-5 py-4 bg-[var(--bg-sunken)] border-b border-[var(--border)]">
                 <div className="flex items-center gap-2 mb-2.5">
-                  <span className="font-mono text-[10px] text-[var(--text-subtle)]">
-                    {card.luhmann_id}
-                  </span>
                   <Badge tone="due">
                     {card.due_date ? `到期 ${relativeTime(card.due_date)}` : '待复习'}
                   </Badge>

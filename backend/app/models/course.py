@@ -106,10 +106,8 @@ class Section(Base):
     idx: Mapped[int] = mapped_column(Integer, nullable=False)
     title: Mapped[str] = mapped_column(String(500), nullable=False)  # 小节标题（大纲阶段生成）
     summary: Mapped[str] = mapped_column(Text, default="", nullable=False)  # 小节要点摘要（大纲阶段生成）
-    # 预计阅读耗时（分钟），AI 在大纲阶段估计；落库时夹紧在 5~90。
-    # 仅用于界面展示（小节标记、课程总时长统计）；番茄钟时长不读它，
-    # 番茄走「用户设置 default_pomodoro_minutes > 25」——AI 估不准个体阅读速度
-    est_minutes: Mapped[int] = mapped_column(Integer, default=25, nullable=False)
+    # 注意：曾有 est_minutes（AI 估计的阅读耗时）——AI 估不准个体速度，已删除。
+    # 番茄钟时长走「用户设置 default_pomodoro_minutes > 25」
 
     # ── 懒生成产物 ──
     # 生成好的正文 Markdown（已剥离尾部概念块）；未生成时为 NULL，是懒生成缓存的本体

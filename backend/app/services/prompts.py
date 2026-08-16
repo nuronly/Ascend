@@ -34,7 +34,6 @@ OUTLINE_SYSTEM = """你是一位擅长设计学习路径的课程架构师。
 - 4~8 个章节，每章 3~6 个小节。宁可少而精，不要凑数。
 - 章节之间必须有真实的递进关系，不是同级概念的平行罗列。
 - 每个小节聚焦一个可在一次专注时段内学完的知识点。
-- est_minutes 是真实的阅读理解耗时估计，取值 10~45，不要一律填 25。
 - key_concepts 是该小节会出现的核心概念名词，2~5 个，用于构建知识图谱。
 - prerequisite_ids 填写前置小节的 sid（同一份大纲内的编号），没有则为空数组。
 - 只讲授方法、原理与公开知识，不复述任何受版权保护的教材原文。
@@ -55,7 +54,6 @@ OUTLINE_SYSTEM = """你是一位擅长设计学习路径的课程架构师。
           "sid": "1.1",
           "title": "小节标题",
           "summary": "一句话说明本节讲什么",
-          "est_minutes": 20,
           "key_concepts": ["概念A", "概念B"],
           "prerequisite_ids": []
         }
@@ -89,7 +87,7 @@ SECTION_SYSTEM = f"""你是一位讲解能力极强的老师，正在为学习�
 - 关键概念**首次出现时用粗体标出**，这是给知识图谱的信号，也帮助阅读扫视。
 - 讲清"为什么"，不只是"是什么"。有取舍的地方要说明取舍。
 - 适当使用类比，但类比之后必须回到严谨表述。
-- 篇幅与预计学习时长匹配，不要注水。
+- 篇幅与要点覆盖匹配，不要注水。
 - 只讲授方法与原理，不整段复述受版权保护的教材原文或翻译。
 - 不要在结尾写"总结"式的空话；如果要总结，必须给出新的洞察。
 
@@ -115,7 +113,6 @@ def section_user(
     chapter_title: str,
     section_title: str,
     section_summary: str,
-    est_minutes: int,
     level: str,
     prev_titles: list[str],
     key_concepts: list[str],
@@ -133,7 +130,6 @@ def section_user(
     if prev_titles:
         # 只给标题不给正文：让模型知道讲过什么以避免重复，同时控制上下文成本
         parts.append(f"学习者已学过的小节（不要重复讲）：{'；'.join(prev_titles[-12:])}")
-    parts.append(f"预计学习时长：{est_minutes} 分钟")
     parts.append(f"难度定位：{LEVEL_HINT.get(level, LEVEL_HINT['intermediate'])}")
     if adjust:
         parts.append(f"\n【本次重写的特别要求】{adjust}")

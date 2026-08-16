@@ -1,7 +1,8 @@
-"""★ 卡片系统 —— 整个产品的核心表（PLAN §3.2 / §5）。
+"""★ 卡片系统 —— 整个产品的核心表。
+注释已人工处理
 
 字段必须一次埋齐：v0.4 第二大脑的质量 = 前三期沉淀数据的质量，
-字段现在没埋，历史数据永远补不回来（PLAN §7 风险 #1，🔴 最高）。
+字段现在没埋，历史数据永远补不回来。
 """
 
 from __future__ import annotations
@@ -50,69 +51,80 @@ RELATIONS = (REL_CONTINUATION, REL_CONTRAST, REL_EVIDENCE, REL_CONSEQUENCE, REL_
 class Card(Base, TimestampMixin):
     __tablename__ = "cards"
 
-    id: Mapped[str] = pk()
+    id: Mapped[str] = pk()  # 主键，uuid hex
+    # 归属用户；注销级联删除。用户一切资产的根外键
     user_id: Mapped[str] = mapped_column(
         IdType, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
 
     # ── 内容 ──
-    question: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    ai_answer: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    question: Mapped[str] = mapped_column(Text, default="", nullable=False)  # 卡片的问题（划词时用户问的）
+    ai_answer: Mapped[str] = mapped_column(Text, default="", nullable=False)  # AI 首轮回答；后续追问在 card_messages
     # user_note = 己见。Folium："卡片应该是处理过的思考，而不是摘抄堆积"（PLAN §1.3）
+    # 进度图「绿球 = 写过己见」看的就是它非空
     user_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    is_rewritten: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_rewritten: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # 是否写过己见的冗余标记（查询方便）
 
     # ── 写入期抽取（PLAN §3.6 第 1 步：把检索难度前移到写入期）──
-    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    concept_tags: Mapped[list[Any]] = mapped_column(JSONType, default=list, nullable=False)
-    enriched_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    summary: Mapped[str] = mapped_column(Text, default="", nullable=False)  # 入 vault 时 AI 抽的一句话摘要，供第二大脑检索
+    concept_tags: Mapped[list[Any]] = mapped_column(JSONType, default=list, nullable=False)  # 概念标签列表，关联概念图用
+    enriched_at: Mapped[datetime | None] = mapped_column(TZDateTime)  # 抽取完成时间；NULL = 未 enrich（draft 卡）
 
     # ── 来源 ──
+    # 从哪划的：course（课程正文）/ doc（文档）/ brain（第二大脑）
     source_type: Mapped[str] = mapped_column(String(20), default=SRC_COURSE, nullable=False)
+    # 来源小节。SET NULL：删课不删卡，只丢来源指针（课程可再生，卡片不可再生）
     source_section_id: Mapped[str | None] = mapped_column(
         IdType, ForeignKey("sections.id", ondelete="SET NULL"), index=True
     )
+    # 来源文档块（与 source_section_id 二选一，看 source_type）
     source_doc_block_id: Mapped[str | None] = mapped_column(
         IdType, ForeignKey("doc_blocks.id", ondelete="SET NULL"), index=True
     )
-    selected_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    selected_text: Mapped[str] = mapped_column(Text, default="", nullable=False)  # 划中的那个词，如「softmax」
     # 原文语境（划中词所在的整句），供卡片头部"引："展示
     context_text: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    # 精确回跳定位：course 记 {prefix, suffix, start, end}；doc 记 {page, block_id, char_offset}
+    # 精确回跳定位（JSON）：course 记 {prefix, suffix, start, end}；doc 记 {page, block_id, char_offset}
+    # 前端靠它在原文里画高亮下划线、点击回跳
     text_anchor: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
 
     # ── ★ 套娃来源 ──
+    # 这张卡怎么来的：source_text（原文划词→根卡）/ parent_answer（在 AI 回答里
+    # 划词→子卡，铁律 #1）/ parent_note（在自己的己见里划词）/ manual（手动新建）
     origin: Mapped[str] = mapped_column(String(20), default=ORIGIN_SOURCE_TEXT, nullable=False)
-    # 当 origin=parent_answer：划中的是父卡的哪一条回答
+    # 当 origin=parent_answer：划中的是父卡的哪一条回答（card_messages.id）
     origin_message_id: Mapped[str | None] = mapped_column(IdType)
-    # 在那条回答文本里的 start/end 偏移，用于父卡内高亮
+    # 在那条回答文本里的 {start, end} 偏移（JSON），用于父卡内高亮「这个词被子卡追问过」
     origin_offset: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
 
     # ── ★ 画布位置（用户拖过就要记住，PLAN §3.2.0）──
-    canvas_x: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    canvas_y: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
-    collapsed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    canvas_x: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)  # 卡片空间里的 x 坐标
+    canvas_y: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)  # y 坐标
+    collapsed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # 是否折叠（只显示标题）
     # 用户是否手动拖动过；没拖过的卡跟随自动布局
     pinned: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    # ── 结构：Luhmann 编号，1 / 1a / 1a1 / 1a1b（PLAN §1.4）──
+    # ── 结构：parent_card_id + depth 表达追问树 ──
+    # 父卡（自引用）。CASCADE：删父卡连同子卡一起删 —— 追问链是父子一体的
     parent_card_id: Mapped[str | None] = mapped_column(
         IdType, ForeignKey("cards.id", ondelete="CASCADE"), index=True
     )
-    luhmann_id: Mapped[str] = mapped_column(String(64), default="", nullable=False)
-    depth: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    depth: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 链深：0=根卡，追问越深越大
 
     # ── 行为关联（PLAN §3.3）──
+    # 建卡时正开着哪颗番茄；番茄结束时的「卡片回顾」就按它捞这批卡。SET NULL：番茄删除不带走卡
     pomodoro_id: Mapped[str | None] = mapped_column(
         IdType, ForeignKey("pomodoros.id", ondelete="SET NULL"), index=True
     )
 
     # ── 状态 ──
+    # 状态机：draft（草稿）→ vault（确认入仓：进图谱、第二大脑、FSRS）/ archived（未整理）
     state: Mapped[str] = mapped_column(String(20), default=STATE_DRAFT, nullable=False)
-    vaulted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
-    touch_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    last_touched_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    vaulted_at: Mapped[datetime | None] = mapped_column(TZDateTime)  # 入仓时间；NULL = 还没进仓库
+    touch_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 被翻出来看过的次数
+    last_touched_at: Mapped[datetime | None] = mapped_column(TZDateTime)  # 最近被触碰时间
 
+    # 自引用关系：子卡列表 / 父卡。noload = 不自动加载，追问树由查询显式组装
     children: Mapped[list[Card]] = relationship(
         back_populates="parent",
         cascade="all, delete-orphan",
@@ -121,6 +133,7 @@ class Card(Base, TimestampMixin):
     parent: Mapped[Card | None] = relationship(
         back_populates="children", remote_side="Card.id", lazy="noload"
     )
+    # 卡内多轮对话，按轮次排序；selectin 一次预加载（卡片详情必带对话）
     messages: Mapped[list[CardMessage]] = relationship(
         back_populates="card",
         cascade="all, delete-orphan",
@@ -129,14 +142,19 @@ class Card(Base, TimestampMixin):
     )
 
     __table_args__ = (
+        # 仓库页：某用户按状态筛、按时间排
         Index("ix_cards_user_state_created", "user_id", "state", "created_at"),
+        # 小节页：某用户在这节建的卡
         Index("ix_cards_user_section", "user_id", "source_section_id"),
+        # 追问树：查某卡的全部子卡
         Index("ix_cards_parent", "parent_card_id"),
+        # 番茄回顾：某用户某颗番茄产出的卡
         Index("ix_cards_user_pomodoro", "user_id", "pomodoro_id"),
     )
 
     @property
     def is_root(self) -> bool:
+        """是否根卡（从原文划的，不是追问出来的）。"""
         return self.parent_card_id is None
 
 
@@ -145,21 +163,22 @@ class CardMessage(Base):
 
     __tablename__ = "card_messages"
 
-    id: Mapped[str] = pk()
+    id: Mapped[str] = pk()  # 主键；子卡的 origin_message_id 指向这里
+    # 属于哪张卡；删卡级联删对话
     card_id: Mapped[str] = mapped_column(
         IdType, ForeignKey("cards.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    seq: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # 第几轮（展示排序）
     role: Mapped[str] = mapped_column(String(16), nullable=False)  # user | assistant
-    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    # 流式生成中途的消息标记为 pending，完成后转 done；失败为 failed
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)  # 这一轮的内容（Markdown）
+    # 流式生成中途的消息标记为 pending，完成后转 done；失败为 failed —— 前端靠它渲染「正在输入」
     status: Mapped[str] = mapped_column(String(16), default="done", nullable=False)
-    token_usage: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
+    token_usage: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)  # 本轮 token 用量（JSON）
     created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
 
     card: Mapped[Card] = relationship(back_populates="messages")
 
-    __table_args__ = (Index("ix_card_messages_card_seq", "card_id", "seq"),)
+    __table_args__ = (Index("ix_card_messages_card_seq", "card_id", "seq"),)  # 按卡取对话、按轮次排序
 
 
 class CardLink(Base):
@@ -172,29 +191,36 @@ class CardLink(Base):
 
     __tablename__ = "card_links"
 
-    id: Mapped[str] = pk()
+    id: Mapped[str] = pk()  # 主键
+    # 归属用户（连线也是用户资产；CASCADE 随用户删除）
     user_id: Mapped[str] = mapped_column(
         IdType, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
+    # 起点卡；任一端卡被删，连线随之消失（CASCADE）
     from_card_id: Mapped[str] = mapped_column(
         IdType, ForeignKey("cards.id", ondelete="CASCADE"), nullable=False
     )
     to_card_id: Mapped[str] = mapped_column(
         IdType, ForeignKey("cards.id", ondelete="CASCADE"), nullable=False
-    )
+    )  # 终点卡
+    # real（用户亲手建的长期关联）/ potential（AI 建议，「是问题不是事实」）
     kind: Mapped[str] = mapped_column(String(16), default=LINK_REAL, nullable=False)
+    # 语义关系：continuation 延续 / contrast 对照 / evidence 证据 / consequence 结果 / tension 张力
     relation: Mapped[str] = mapped_column(String(20), default=REL_CONTINUATION, nullable=False)
-    note: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    confidence: Mapped[float | None] = mapped_column(Float)  # 仅 potential 有
-    created_by: Mapped[str] = mapped_column(String(10), default="user", nullable=False)
-    promoted_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+    note: Mapped[str] = mapped_column(Text, default="", nullable=False)  # 连线的备注说明（可选）
+    confidence: Mapped[float | None] = mapped_column(Float)  # AI 对建议的置信度，仅 potential 有
+    created_by: Mapped[str] = mapped_column(String(10), default="user", nullable=False)  # user / ai —— AI 只能产 potential
+    promoted_at: Mapped[datetime | None] = mapped_column(TZDateTime)  # 用户把 potential「提升」为 real 的时间
     # 用户明确拒绝过的 potential，不再重复推荐
     dismissed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
 
     __table_args__ = (
+        # 从焦点卡出发/到达焦点卡的连线（问题图渲染）
         Index("ix_card_links_from_kind", "from_card_id", "kind"),
         Index("ix_card_links_to_kind", "to_card_id", "kind"),
+        # 某用户的某类连线列表
         Index("ix_card_links_user", "user_id", "kind"),
+        # 同一对卡同一层只允许一条 —— 防重复建链
         Index("uq_card_links_pair", "from_card_id", "to_card_id", "kind", unique=True),
     )

@@ -56,8 +56,6 @@ interface CardSpaceState {
   moveCard: (cardId: string, x: number, y: number) => void
 
   linkCards: (from: string, to: string, relation?: string) => Promise<void>
-  promoteLink: (linkId: string) => Promise<void>
-  dismissLink: (linkId: string) => Promise<void>
 
   setFocus: (id: string | null) => void
   setHover: (id: string | null) => void
@@ -306,18 +304,11 @@ export const useCardSpace = create<CardSpaceState>((set, get) => ({
 
   toVault: async (cardId) => {
     try {
-      const updated = await api.post<Card & { potential_links?: CardLink[] }>(
-        `/cards/${cardId}/vault`,
-      )
+      const updated = await api.post<Card>(`/cards/${cardId}/vault`)
       set((s) => ({
         cards: s.cards.map((c) => (c.id === cardId ? { ...c, ...updated } : c)),
-        links: [
-          ...s.links.filter((l) => !(updated.potential_links ?? []).some((p) => p.id === l.id)),
-          ...(updated.potential_links ?? []),
-        ],
       }))
-      const n = updated.potential_links?.length ?? 0
-      toast.ok(n ? `已收进仓库 · 发现 ${n} 条可能的关联` : '已收进仓库')
+      toast.ok('已收进仓库')
     } catch (e: any) {
       toast.error(e?.message ?? '收进仓库失败')
     }
@@ -385,17 +376,6 @@ export const useCardSpace = create<CardSpaceState>((set, get) => ({
     } catch (e: any) {
       toast.error(e?.message ?? '建立关联失败')
     }
-  },
-
-  promoteLink: async (linkId) => {
-    const link = await api.post<CardLink>(`/cards/links/${linkId}/promote`)
-    set((s) => ({ links: s.links.map((l) => (l.id === linkId ? link : l)) }))
-    toast.ok('已提升为正式关联')
-  },
-
-  dismissLink: async (linkId) => {
-    set((s) => ({ links: s.links.filter((l) => l.id !== linkId) }))
-    await api.post(`/cards/links/${linkId}/dismiss`).catch(() => {})
   },
 
   setFocus: (focusCardId) => set({ focusCardId }),

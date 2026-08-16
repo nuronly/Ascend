@@ -352,19 +352,12 @@ export default function GuidePage() {
           <div className="mt-5 flex flex-wrap gap-x-5 gap-y-2 text-[12.5px] text-[var(--text-muted)]">
             <span className="flex items-center gap-2">
               <span className="w-5 h-0 border-t-2" style={{ borderColor: 'var(--sem-real)' }} />
-              正式关联：你亲手连的
-            </span>
-            <span className="flex items-center gap-2">
-              <span
-                className="w-5 h-0 border-t-[1.5px] border-dashed"
-                style={{ borderColor: 'var(--sem-potential)' }}
-              />
-              可能关联：AI 的猜测
+              关联：你亲手连的
             </span>
           </div>
           <Muted>
-            注意这个区别：AI <b>只能</b>建议「这两张卡可能相关」，虚线表示。
-            只有你点了确认，它才会变成实线。你的认知地图不允许 AI 乱画。
+            卡片之间的连线只能由你亲手建立（从一张卡拖到另一张）。
+            你的认知地图不允许 AI 乱画。
           </Muted>
 
           {/* ── 第二大脑 ── */}
@@ -402,7 +395,7 @@ export default function GuidePage() {
           <H id="pomodoro">番茄钟</H>
           <P>
             它不是一个独立的计时器，而是学习行为的<b>计量单位</b>。
-            进入小节时自动开始，时长对齐这一节的预计用时。
+            进入小节时自动开始，默认时长可在「设置」里调整。
           </P>
           <P>
             这段时间里产生的卡片会自动归到这颗番茄名下。
@@ -467,7 +460,7 @@ export default function GuidePage() {
               ],
               [
                 '为什么 AI 不能自动连线',
-                '如果 AI 能往图里加边，几天后你的图就会变成一张噪音网。所以它只能提出虚线建议，实线永远由你确认。',
+                '如果 AI 能往图里加边，几天后你的图就会变成一张噪音网。所以连线永远由你亲手建立。',
               ],
               [
                 '为什么逼你写「我的话」',
@@ -494,7 +487,7 @@ export default function GuidePage() {
           <div className="mt-14 pt-7 border-t border-[var(--border)]">
             <P className="text-[var(--text-muted)]">
               你的卡片随时可以完整导出（Markdown 或 JSON）。
-              Markdown 包里双链写成 <code className="font-mono text-[13px]">[[编号]]</code>，
+              Markdown 包里双链写成 <code className="font-mono text-[13px]">[[卡片名]]</code>，
               直接扔进 Obsidian 就能用。数据是你的。
             </P>
             <Link

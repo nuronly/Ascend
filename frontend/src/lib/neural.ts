@@ -14,7 +14,6 @@ export interface Neuron {
   label: string
   term: string
   depth: number
-  luhmann_id: string
   rewritten: boolean
   touch: number
   degree: number
@@ -31,7 +30,7 @@ export interface Neuron {
 export interface Synapse {
   a: string
   b: string
-  kind: 'parent' | 'real' | 'potential'
+  kind: 'parent' | 'real'
   relation?: string
 }
 
@@ -276,7 +275,6 @@ export interface Palette {
   edge: string
   edgeParent: string
   edgeReal: string
-  edgePotential: string
   node: string
   nodeRewritten: string
   nodeDue: string
@@ -297,7 +295,6 @@ export const LIGHT_PALETTE: Palette = {
   edge: 'rgba(100, 116, 139, 0.12)',
   edgeParent: 'rgba(100, 116, 139, 0.30)',
   edgeReal: 'rgba(217, 119, 6, 0.55)',
-  edgePotential: 'rgba(100, 116, 139, 0.18)',
   node: '#7ba3d8',
   nodeRewritten: '#2fa37a',
   nodeDue: '#e0883a',
@@ -317,7 +314,6 @@ export const DARK_PALETTE: Palette = {
   edge: 'rgba(148, 163, 200, 0.10)',
   edgeParent: 'rgba(148, 163, 200, 0.20)',
   edgeReal: 'rgba(214, 154, 74, 0.55)',
-  edgePotential: 'rgba(148, 163, 200, 0.13)',
   node: '#4a5875',
   nodeRewritten: '#3f8f70',
   nodeDue: '#c8813c',

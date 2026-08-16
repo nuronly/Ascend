@@ -83,7 +83,6 @@ async def card_graph(
             {
                 "id": c.id,
                 "label": c.summary or c.selected_text or c.question[:40],
-                "luhmann_id": c.luhmann_id,
                 "depth": c.depth,
                 "is_rewritten": c.is_rewritten,  # 己见卡 → 实心描边
                 "state": c.state,
