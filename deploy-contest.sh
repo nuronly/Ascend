@@ -20,7 +20,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
-PORT="${PORT:-8848}"
+# 端口：SynNovator 平台默认只放行 22，官方后来开放了 8000（见比赛通知）。
+# 8000 是当前唯一适合 Web 服务的端口（22 被 SSH 占用、3389 是 Windows RDP）。
+PORT="${PORT:-8000}"
 
 B=$'\033[1m'; G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; D=$'\033[2m'; X=$'\033[0m'
 ok()   { printf "${G}✓${X} %s\n" "$1"; }
