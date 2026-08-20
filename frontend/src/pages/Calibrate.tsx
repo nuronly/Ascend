@@ -83,7 +83,9 @@ export default function CalibratePage() {
     sse(`/courses/calibrate/stream?${qs}`, {
       signal: ctrl.signal,
       onEvent: (ev, data) => {
-        if (ev === 'total') setTotal(Number(data?.total) || 0)
+        // 快批的概念可能比 total 先到，慢批的 total 随后才来 —— 取大的，
+        // 分母只增不减，进度条不会往回跳
+        if (ev === 'total') setTotal((t) => Math.max(t, Number(data?.total) || 0))
         if (ev === 'concept' && data?.name) {
           setConcepts((cs) => (cs.some((c) => c.name === data.name) ? cs : [...cs, data]))
           // 预勾的概念直接给「熟悉」的默认值；其余默认「没接触」——

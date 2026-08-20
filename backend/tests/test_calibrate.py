@@ -300,10 +300,16 @@ def _fake_stream(*, reasoning: str = "", body: str = _MAP_JSON, boom: Exception 
     return gen
 
 
-def _collect(coro_factory, *, cached: str | None = None, stream=None) -> list[dict]:
-    """跑一遍流式生成，收集所有 SSE 事件（同时把缓存与模型都换成替身）。"""
-    real_stream, real_get, real_put = (
-        calibrate.stream_chat, calibrate.cache_get, calibrate.cache_put,
+def _collect(
+    coro_factory,
+    *,
+    cached: str | None = None,
+    stream=None,
+    quick: dict | Exception | None = None,
+) -> list[dict]:
+    """跑一遍流式生成，收集所有 SSE 事件（缓存、快批、慢批全换成替身）。"""
+    real_stream, real_get, real_put, real_json = (
+        calibrate.stream_chat, calibrate.cache_get, calibrate.cache_put, calibrate.chat_json,
     )
     put: dict[str, str] = {}
 
@@ -313,9 +319,18 @@ def _collect(coro_factory, *, cached: str | None = None, stream=None) -> list[di
     async def fake_put(k, *_a):
         put[k] = "written"
 
+    quick_payload = {"concepts": []} if quick is None else quick
+
+    async def fake_quick(*a, **kw):
+        _REAL_SIG.bind(*a, **kw)
+        if isinstance(quick_payload, Exception):
+            raise quick_payload
+        return quick_payload
+
     calibrate.stream_chat = stream or _fake_stream()  # type: ignore[assignment]
     calibrate.cache_get = fake_get  # type: ignore[assignment]
     calibrate.cache_put = fake_put  # type: ignore[assignment]
+    calibrate.chat_json = fake_quick  # type: ignore[assignment]
 
     async def run():
         return [ev async for ev in coro_factory()]
@@ -326,6 +341,7 @@ def _collect(coro_factory, *, cached: str | None = None, stream=None) -> list[di
         calibrate.stream_chat = real_stream  # type: ignore[assignment]
         calibrate.cache_get = real_get  # type: ignore[assignment]
         calibrate.cache_put = real_put  # type: ignore[assignment]
+        calibrate.chat_json = real_json  # type: ignore[assignment]
     events.append({"event": "_cache_written", "data": {"n": len(put)}})
     return events
 
@@ -404,6 +420,53 @@ class Test流式概念地图:
         assert len(_of(ev, "concept")) == 3
 
 
+class Test快批抢时间:
+    """慢批实测能想 100 秒以上。快批用小模型秒出最外围的几个，先让人有题可答。"""
+
+    QUICK = {
+        "concepts": [
+            {"name": "线性代数", "gloss": "向量与矩阵的运算", "depth": 1},
+            {"name": "矩阵乘法", "gloss": "快批也给了这个", "depth": 1},
+        ]
+    }
+
+    def _run(self, **kw):
+        u = _user()
+        return _collect(
+            lambda: calibrate.stream_concept_map(user=u, topic="Transformer"), **kw
+        )
+
+    def test_快批的题排在慢批前面(self):
+        """否则用户还是要等一百秒才看到第一道。"""
+        ev = self._run(quick=self.QUICK)
+        names = [c["name"] for c in _of(ev, "concept")]
+        assert names[0] == "线性代数"
+
+    def test_两批重名的只算一次(self):
+        ev = self._run(quick=self.QUICK)
+        names = [c["name"] for c in _of(ev, "concept")]
+        assert names.count("矩阵乘法") == 1
+        # 快批先到，所以留下的是快批那条
+        by = {c["name"]: c for c in _of(ev, "concept")}
+        assert by["矩阵乘法"]["gloss"] == "快批也给了这个"
+
+    def test_序号连续_两批混着也不重号(self):
+        ev = self._run(quick=self.QUICK)
+        idxs = [c["idx"] for c in _of(ev, "concept")]
+        assert idxs == list(range(1, len(idxs) + 1))
+
+    def test_快批挂了不算失败(self):
+        """它只是抢时间的，慢批照样给出完整地图。"""
+        ev = self._run(quick=RuntimeError("小模型 500"))
+        assert len(_of(ev, "concept")) == 3
+        assert _of(ev, "done")[0]["failed"] is False
+
+    def test_慢批挂了还能用快批的题(self):
+        ev = self._run(quick=self.QUICK, stream=_fake_stream(boom=RuntimeError("上游 500")))
+        assert [c["name"] for c in _of(ev, "concept")] == ["线性代数", "矩阵乘法"]
+        assert _of(ev, "done")[0]["failed"] is True
+
+
 class Test规整单条:
     def test_丢掉无名与重复(self):
         seen: set[str] = set()
@@ -426,6 +489,7 @@ def _独立运行() -> int:
         Test抽查选题,
         Test自评校验,
         Test流式概念地图,
+        Test快批抢时间,
         Test规整单条,
     ]
     ok = failed = 0
