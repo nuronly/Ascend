@@ -342,7 +342,7 @@ export default function CoursePage() {
                                 : 'bg-[var(--bg-sunken)] text-[var(--text-muted)]',
                             )}
                           >
-                            📓 笔记{notes.notes[s.id].state === 'vault' ? '' : '·草稿'}
+                            笔记{notes.notes[s.id].state === 'vault' ? '' : '·草稿'}
                           </span>
                         )}
                       </div>

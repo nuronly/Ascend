@@ -271,7 +271,7 @@ export default function VaultPage() {
         open={!!detail}
         onClose={() => setDetail(null)}
         width="max-w-2xl"
-        title={detail ? `📓 ${detail.question || detail.selected_text}` : ''}
+        title={detail ? detail.question || detail.selected_text : ''}
         subtitle={
           detail && (
             <span className="flex flex-wrap items-center gap-2">
