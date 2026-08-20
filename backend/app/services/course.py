@@ -135,6 +135,49 @@ def _tool_sse(ev, found: dict[str, dict]) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
+# 思维链
+# ─────────────────────────────────────────────────────────────
+class _Thinking:
+    """把思维链攒成一段一段推给前端。
+
+    ★ 只报「已推理 N 字」是不够的：那只证明进程还活着，用户还是不知道模型
+      在想什么，等待照样难熬。真正让人安心的是看见推理本身 —— 它正在权衡
+      先讲什么、要不要先查一下。所以思维链原文要推出去。
+
+      但不能逐 chunk 直推：思维链是逐 token 来的，一份大纲能有几千个 chunk，
+      原样直推等于让前端 setState 几千次，肉眼可见地卡。攒到 _CHUNK 个字符
+      发一段，既保留原文又把事件数压到几十个，读起来还更像「一句一句在想」。
+    """
+
+    _CHUNK = 48
+
+    def __init__(self) -> None:
+        self.total = 0
+        self._buf: list[str] = []
+        self._len = 0
+
+    def add(self, text: str) -> dict | None:
+        """吃一片思维链；攒够一段就返回待发的 SSE 事件，否则 None。"""
+        self.total += len(text)
+        self._buf.append(text)
+        self._len += len(text)
+        return self.flush() if self._len >= self._CHUNK else None
+
+    def flush(self) -> dict | None:
+        """把没攒满的尾巴吐出来。
+
+        切去调工具或开始吐正文时必须调一次，否则最后那半句思考会一直卡在
+        缓冲里，等下一段思维链才露出来 —— 时序就乱了。
+        """
+        if not self._buf:
+            return None
+        text = "".join(self._buf)
+        self._buf.clear()
+        self._len = 0
+        return {"event": "thinking", "data": {"text": text, "chars": self.total}}
+
+
+# ─────────────────────────────────────────────────────────────
 # 大纲
 # ─────────────────────────────────────────────────────────────
 # 旗舰模型设计一门 6 章 24 节的大纲要 2 分钟以上。
@@ -161,7 +204,7 @@ async def stream_outline(
 
     buf: list[str] = []
     seen_titles = 0
-    thinking_chars = 0
+    think = _Thinking()
     # 本次生成过程中真实检索到的 url → 结果项。落库时拿它当白名单校验
     found: dict[str, dict] = {}
     try:
@@ -183,13 +226,17 @@ async def stream_outline(
                 break
             # 工具调用：正在搜什么、搜到了什么，实时说出来
             if chunk.tool_event:
+                if pending := think.flush():  # 想完了去查资料，先把那半句思考说完
+                    yield pending
                 yield _tool_sse(chunk.tool_event, found)
                 continue
-            # 思维链：只作为「正在思考」信号透出，不进 buf —— 混进正文会污染大纲 JSON
+            # 思维链：原文透出去给用户看，但不进 buf —— 混进正文会污染大纲 JSON
             if chunk.reasoning:
-                thinking_chars += len(chunk.reasoning)
-                yield {"event": "thinking", "data": {"chars": thinking_chars}}
+                if pending := think.add(chunk.reasoning):
+                    yield pending
                 continue
+            if pending := think.flush():  # 开始吐 JSON 了，思考阶段收尾
+                yield pending
             buf.append(chunk.delta)
             # 每冒出一个新标题就报一次进度 —— 用户看到大纲在长出来
             titles = _TITLE_PROBE.findall("".join(buf))
@@ -424,7 +471,7 @@ async def stream_section_content(
     yield {"event": "start", "data": {"section_id": section.id, "title": section.title}}
 
     buf: list[str] = []
-    thinking_chars = 0
+    think = _Thinking()
     found: dict[str, dict] = {}
     try:
         async for chunk in stream_chat(
@@ -444,13 +491,17 @@ async def stream_section_content(
                 break
             # 正在核实什么 / 找到了什么，实时说出来
             if chunk.tool_event:
+                if pending := think.flush():
+                    yield pending
                 yield _tool_sse(chunk.tool_event, found)
                 continue
-            # 思维链只作为「正在思考」信号透出，不进正文
+            # 思维链原文透出去（前端单独渲染），不进正文
             if chunk.reasoning:
-                thinking_chars += len(chunk.reasoning)
-                yield {"event": "thinking", "data": {"chars": thinking_chars}}
+                if pending := think.add(chunk.reasoning):
+                    yield pending
                 continue
+            if pending := think.flush():  # 正文开始，思考阶段收尾
+                yield pending
             buf.append(chunk.delta)
             yield {"event": "delta", "data": {"text": chunk.delta}}
     except Exception as exc:

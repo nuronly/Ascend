@@ -11,6 +11,7 @@ import { CardSpace } from '@/components/CardSpace'
 import { SelectionPopover } from '@/components/SelectionPopover'
 import { useSelection, findAnchor } from '@/components/useSelection'
 import { PomodoroPill } from '@/components/Pomodoro'
+import RunTimeline, { ResourceList, type ToolStep } from '@/components/RunTimeline'
 import { Badge, Button, Spinner, Tip } from '@/components/ui'
 import { cn } from '@/lib/utils'
 
@@ -45,6 +46,8 @@ export default function SectionPage() {
   const [content, setContent] = useState('')
   const [generating, setGenerating] = useState(false)
   const [thinking, setThinking] = useState(0)
+  const [thinkingText, setThinkingText] = useState('')
+  const [tools, setTools] = useState<ToolStep[]>([])
   const [adjustOpen, setAdjustOpen] = useState(false)
   const [narrowDrawer, setNarrowDrawer] = useState(false)
 
@@ -77,6 +80,8 @@ export default function SectionPage() {
       setGenerating(true)
       setContent('')
       setThinking(0)
+      setThinkingText('')
+      setTools([])
       let buf = ''
 
       const qs = new URLSearchParams()
@@ -92,8 +97,29 @@ export default function SectionPage() {
         onEvent: (ev, data) => {
           // 概念块被后端剥掉后会补发一次干净全文，用它对齐
           if (ev === 'content' && typeof data?.markdown === 'string') setContent(data.markdown)
-          // 推理模型的思维链：正文开始前的「思考中」状态
-          if (ev === 'thinking') setThinking(data?.chars ?? 0)
+          // 推理模型的思维链：正文开始前它在盘怎么讲，摊出来给用户看
+          if (ev === 'thinking') {
+            setThinking(data?.chars ?? 0)
+            // 只留尾部，免得 DOM 跟着上万字的推理一起长
+            if (data?.text) setThinkingText((t) => (t + data.text).slice(-4000))
+          }
+          if (ev === 'tool_call') {
+            setTools((t) => [
+              ...t,
+              { name: data?.name ?? '', query: data?.detail ?? '', state: 'running' },
+            ])
+          }
+          // 结果回填到最后一条 running 上：工具是串行执行的，不会错位
+          if (ev === 'tool_result' || ev === 'tool_error') {
+            const ok = ev === 'tool_result'
+            setTools((t) =>
+              t.map((s, i) =>
+                i === t.length - 1
+                  ? { ...s, state: ok ? 'done' : 'error', detail: data?.detail, items: data?.items ?? [] }
+                  : s,
+              ),
+            )
+          }
         },
         onDone: () => {
           setGenerating(false)
@@ -348,6 +374,18 @@ export default function SectionPage() {
 
             <ReadingHint visible={!!content && !generating && cards.length === 0} />
 
+            {/* ── 生成过程：在想什么、在核实什么 ──
+                 放在 readRef 外面：划词高亮只该认正文，不该把这段过程算进去。
+                 正文开始后不撤掉 —— 模型中途可能再查一次资料，那也得让用户看见。 */}
+            {generating && (
+              <RunTimeline
+                thinking={thinking}
+                thinkingText={thinkingText}
+                tools={tools}
+                className={cn('mb-6', content && 'pb-5 border-b border-[var(--border)]')}
+              />
+            )}
+
             {/* 划词区 */}
             <div ref={readRef} className="select-text">
               {content ? (
@@ -358,12 +396,6 @@ export default function SectionPage() {
                 </div>
               ) : generating ? (
                 <div className="space-y-3">
-                  <div className="flex items-center gap-2 text-[13px] text-[var(--text-muted)] mb-6">
-                    <Spinner className="size-3.5 text-[var(--accent)]" />
-                    {thinking > 0
-                      ? `AI 正在思考…（已推理 ${thinking.toLocaleString()} 字）`
-                      : '正在为你写这一节…'}
-                  </div>
                   {[5, 4, 5, 3, 4, 5, 2].map((w, i) => (
                     <div key={i} className="skeleton h-3.5" style={{ width: `${w * 18}%` }} />
                   ))}
@@ -377,6 +409,11 @@ export default function SectionPage() {
                 </div>
               )}
             </div>
+
+            {/* AI 联网核对过的延伸阅读。来源域名露出来，学习者自己判断可不可信 */}
+            {!generating && !!section.resources?.length && (
+              <ResourceList items={section.resources} title="延伸阅读" className="mt-12" />
+            )}
 
             {/* 上下节导航 */}
             {!generating && content && (

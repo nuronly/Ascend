@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react'
 import type { Resource } from '@/lib/types'
 import { RESOURCE_KIND_LABEL } from '@/lib/types'
 import { Spinner } from '@/components/ui'
@@ -24,22 +25,41 @@ export interface ToolStep {
 
 interface Props {
   thinking: number
+  /** 思维链原文（已由后端攒成段）。有它就直接摊开给用户看 */
+  thinkingText?: string
   tools: ToolStep[]
-  titles: string[]
+  titles?: string[]
   className?: string
 }
 
-export default function RunTimeline({ thinking, tools, titles, className }: Props) {
+export default function RunTimeline({
+  thinking,
+  thinkingText = '',
+  tools,
+  titles = [],
+  className,
+}: Props) {
   const nothingYet = !thinking && !tools.length && !titles.length
 
   return (
     <div className={cn('space-y-2.5', className)}>
       {/* 推理模型先跑思维链再吐正文，这一段可能持续几十秒 */}
       {thinking > 0 && (
-        <Row
-          icon={<span className="size-1.5 rounded-full bg-[var(--accent)] animate-pulse" />}
-          text={`正在深入思考…（已推理 ${thinking.toLocaleString()} 字）`}
-        />
+        <div>
+          <Row
+            icon={<span className="size-1.5 rounded-full bg-[var(--accent)] animate-pulse" />}
+            text={
+              <>
+                <span className="text-[var(--text-muted)]">正在深入思考</span>
+                <span className="mx-1 opacity-40">·</span>
+                <span className="tabular-nums text-[var(--text-subtle)]">
+                  {thinking.toLocaleString()} 字
+                </span>
+              </>
+            }
+          />
+          {thinkingText && <ThinkingStream text={thinkingText} />}
+        </div>
       )}
 
       {tools.map((t, i) => (
@@ -128,6 +148,32 @@ export default function RunTimeline({ thinking, tools, titles, className }: Prop
           text={<span className="text-[var(--text-muted)]">正在连接模型…</span>}
         />
       )}
+    </div>
+  )
+}
+
+/** 思维链正文。淡一号、贴底滚，看着就是「它正在想」 */
+function ThinkingStream({ text }: { text: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+
+  // 永远贴着最新那句。思考是「正在发生」的事，让用户自己往下拖就毫无意义了
+  useEffect(() => {
+    const el = ref.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [text])
+
+  return (
+    <div
+      ref={ref}
+      className={cn(
+        'ml-[18px] mt-1.5 pl-2.5 border-l border-[var(--border)]',
+        'max-h-[132px] overflow-y-auto',
+        // 思维链是自然段夹换行，pre-wrap 保住它的呼吸感；
+        // break-words 是防它甩出一串没有空格的长标识符把布局撑破
+        'text-[11.5px] leading-[1.8] text-[var(--text-subtle)] whitespace-pre-wrap break-words',
+      )}
+    >
+      {text}
     </div>
   )
 }

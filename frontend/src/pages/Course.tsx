@@ -26,6 +26,7 @@ export default function CoursePage() {
   const [outlining, setOutlining] = useState(false)
   const [progress, setProgress] = useState<string[]>([])
   const [thinking, setThinking] = useState(0)
+  const [thinkingText, setThinkingText] = useState('')
   const [tools, setTools] = useState<ToolStep[]>([])
   const started = useRef(false)
   // 窄屏下路径图折叠（左右各一半在手机上没法看）
@@ -37,6 +38,7 @@ export default function CoursePage() {
       setOutlining(true)
       setProgress([])
       setThinking(0)
+      setThinkingText('')
       setTools([])
 
       sse(`/courses/${courseId}/outline/stream${force ? '?force=true' : ''}`, {
@@ -44,8 +46,12 @@ export default function CoursePage() {
           if (ev === 'progress' && data?.title) {
             setProgress((p) => (p.includes(data.title) ? p : [...p, data.title]))
           }
-          // 推理模型的思维链阶段：正文 JSON 还没开始吐，先让等待可见
-          if (ev === 'thinking') setThinking(data?.chars ?? 0)
+          // 推理模型的思维链阶段：正文 JSON 还没开始吐，先把它在想什么摊出来
+          if (ev === 'thinking') {
+            setThinking(data?.chars ?? 0)
+            // 一次推理能上万字，只留尾部：DOM 不无限长，而用户看的本来也只是最新几行
+            if (data?.text) setThinkingText((t) => (t + data.text).slice(-4000))
+          }
           if (ev === 'tool_call') {
             setTools((t) => [
               ...t,
@@ -192,7 +198,13 @@ export default function CoursePage() {
             这一步用的是最强的模型，大约需要一到两分钟。它会先联网核对这个领域的知识体系，
             再规划章节递进和小节之间的前置依赖。
           </p>
-          <RunTimeline thinking={thinking} tools={tools} titles={progress} className="mt-4" />
+          <RunTimeline
+            thinking={thinking}
+            thinkingText={thinkingText}
+            tools={tools}
+            titles={progress}
+            className="mt-4"
+          />
         </div>
       )}
 
