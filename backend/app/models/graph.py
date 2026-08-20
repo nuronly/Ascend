@@ -1,83 +1,24 @@
-"""概念图（AI 侧）与 Workspace 临时画布（PLAN §1.2 / §3.4 / §5）。"""
+"""Workspace 临时画布（PLAN §1.2）。
+
+这里原本还有一套 AI 概念图（Concept / ConceptEdge / CardConcept）。它的节点
+是从**小节正文**里抽取的概念，也就是说只有正文生成之后才有内容 —— 刚建完课
+时它完全是空的，撑不起「学之前就知道要学什么」这个最重要的诉求。
+
+那个职责现在交给课程自己的学习路径图：节点就是小节，边是
+`sections.prerequisite_ids`，大纲一生成就完整可用。概念图整套随之移除，
+卡片侧只保留 `cards.concept_tags`（纯标签，供检索、仓库页与勋章统计）。
+"""
 
 from __future__ import annotations
 
-from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, Float, ForeignKey, Index, String, Text
+from sqlalchemy import Boolean, Float, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.db import Base
-from app.core.types import IdType, JSONType, TZDateTime
+from app.core.types import IdType, JSONType
 from app.models._common import TimestampMixin, pk
-
-
-# ─────────────────────────────────────────────────────────────
-# AI 概念图：客观的"这个领域长什么样"
-# ─────────────────────────────────────────────────────────────
-class Concept(Base):
-    __tablename__ = "concepts"
-
-    id: Mapped[str] = pk()
-    user_id: Mapped[str] = mapped_column(
-        IdType, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    course_id: Mapped[str | None] = mapped_column(
-        IdType, ForeignKey("courses.id", ondelete="CASCADE"), index=True
-    )
-    name: Mapped[str] = mapped_column(String(200), nullable=False)
-    # 归一化后的名字，用于去重与匹配卡片标签
-    norm_name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
-    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
-    section_id: Mapped[str | None] = mapped_column(
-        IdType, ForeignKey("sections.id", ondelete="SET NULL"), index=True
-    )
-    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False)
-
-    __table_args__ = (
-        Index("uq_concepts_course_name", "course_id", "norm_name", unique=True),
-        Index("ix_concepts_user", "user_id"),
-    )
-
-
-class ConceptEdge(Base):
-    __tablename__ = "concept_edges"
-
-    id: Mapped[str] = pk()
-    user_id: Mapped[str] = mapped_column(
-        IdType, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
-    course_id: Mapped[str | None] = mapped_column(
-        IdType, ForeignKey("courses.id", ondelete="CASCADE"), index=True
-    )
-    from_concept: Mapped[str] = mapped_column(
-        IdType, ForeignKey("concepts.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    to_concept: Mapped[str] = mapped_column(
-        IdType, ForeignKey("concepts.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    # prerequisite / part_of / related / contrast
-    relation: Mapped[str] = mapped_column(String(20), default="related", nullable=False)
-
-    __table_args__ = (
-        Index("uq_concept_edges", "from_concept", "to_concept", "relation", unique=True),
-    )
-
-
-class CardConcept(Base):
-    """叠加视图的连接桥（PLAN §3.4 ★ 杀手锏）。"""
-
-    __tablename__ = "card_concepts"
-
-    card_id: Mapped[str] = mapped_column(
-        IdType, ForeignKey("cards.id", ondelete="CASCADE"), primary_key=True
-    )
-    concept_id: Mapped[str] = mapped_column(
-        IdType, ForeignKey("concepts.id", ondelete="CASCADE"), primary_key=True
-    )
-    user_id: Mapped[str] = mapped_column(IdType, nullable=False, index=True)
-    weight: Mapped[float] = mapped_column(Float, default=1.0, nullable=False)
 
 
 # ─────────────────────────────────────────────────────────────

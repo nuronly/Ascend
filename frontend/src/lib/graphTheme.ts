@@ -16,9 +16,7 @@ export interface GraphPalette {
   bg: string
   text: string
   textSoft: string
-  /** 概念图：客观地图，不掺学习状态，所以只有一种中性色 */
-  concept: Fill
-  /** 进度视图三档 */
+  /** 学习路径图三档：还没开始 → 读过 → 学完（见 components/SectionTree） */
   blank: Fill
   covered: Fill
   owned: Fill
@@ -47,9 +45,8 @@ export const LIGHT: GraphPalette = {
   bg: '#f7f9fc',
   text: '#334155',
   textSoft: '#94a3b8',
-  concept: { fill: '#dbeafe', stroke: '#93c5fd' },
   // 空白 = 空心。用描边而不是填充来表达"还没碰过"，
-  // 否则一门新课（覆盖率 0%）满屏都是同一个色块，看着像加载失败。
+  // 否则一门新课满屏都是同一个色块，看着像加载失败。
   // 描边一度用 #cbd5e1，实测对比度只有 1.41 —— 这就是"整张图看不见"的量化证据
   blank: { fill: '#ffffff', stroke: '#aab8c8', text: '#64748b' },
   covered: { fill: '#bfdbfe', stroke: '#60a5fa' },
@@ -72,7 +69,6 @@ export const DARK: GraphPalette = {
   bg: '#12141a',
   text: '#e2e8f0',
   textSoft: '#8b94a5',
-  concept: { fill: '#38445c', stroke: '#6b7c99' },
   blank: { fill: 'rgba(255,255,255,0.04)', stroke: 'rgba(255,255,255,0.34)', text: '#9aa3b2' },
   covered: { fill: '#3f5677', stroke: '#7ba3e0' },
   owned: { fill: '#2f6551', stroke: '#5ecfa0' },
@@ -92,6 +88,12 @@ export const DARK: GraphPalette = {
 /** 悬停/选中时的描边宽度，抽出来是为了让各处保持一致 */
 const RING = 3
 
+/**
+ * 问题图（卡片图）的样式表。
+ *
+ * 学习路径图不走这里 —— 它的节点是方块、语义是三档学习状态，
+ * 自己在 components/SectionTree 里定义，只共用这份调色板。
+ */
 export function makeStylesheet(p: GraphPalette): cytoscape.StylesheetJson {
   const node = (f: Fill, extra: Record<string, unknown> = {}) => ({
     'background-color': f.fill,
@@ -109,8 +111,8 @@ export function makeStylesheet(p: GraphPalette): cytoscape.StylesheetJson {
         label: 'data(label)',
         width: 'data(size)',
         height: 'data(size)',
-        'background-color': p.concept.fill,
-        'border-color': p.concept.stroke,
+        'background-color': p.card.fill,
+        'border-color': p.card.stroke,
         'border-width': 1.5,
         color: p.text,
         'font-size': 10.5,
@@ -123,15 +125,6 @@ export function makeStylesheet(p: GraphPalette): cytoscape.StylesheetJson {
         'transition-duration': 140,
       } as never,
     },
-
-    { selector: 'node.concept', style: node(p.concept) as never },
-
-    // ── 进度视图三档：空心 → 蓝 → 绿 ──────────────────────────
-    // 概念图不着色（它讲的是领域客观长什么样，跟我啃没啃过无关），
-    // 只有进度视图才把学习状态叠上去，两个视图的人格差异靠这个拉开
-    { selector: 'node.overlay.blank', style: node(p.blank, { 'border-style': 'dashed' }) as never },
-    { selector: 'node.overlay.covered', style: node(p.covered) as never },
-    { selector: 'node.overlay.owned', style: node(p.owned, { 'border-width': 2 }) as never },
 
     { selector: 'node.card', style: node(p.card, { 'font-size': 9.5 }) as never },
     { selector: 'node.rewritten', style: node(p.rewritten, { 'border-width': 2 }) as never },
@@ -163,25 +156,6 @@ export function makeStylesheet(p: GraphPalette): cytoscape.StylesheetJson {
 
     // ── 有向的骨架边：撑起层级，画成带箭头的实线 ────────────────
     {
-      selector: 'edge.prerequisite',
-      style: {
-        'line-color': p.prerequisite,
-        'target-arrow-shape': 'triangle',
-        'target-arrow-color': p.prerequisite,
-        'arrow-scale': 0.75,
-        width: 1.6,
-      } as never,
-    },
-    {
-      selector: 'edge.part_of',
-      style: {
-        'line-color': p.partOf,
-        'target-arrow-shape': 'chevron',
-        'target-arrow-color': p.partOf,
-        'arrow-scale': 0.7,
-      } as never,
-    },
-    {
       selector: 'edge.parent',
       style: {
         'line-color': p.parent,
@@ -191,26 +165,14 @@ export function makeStylesheet(p: GraphPalette): cytoscape.StylesheetJson {
       } as never,
     },
 
-    // ── 无向边：不参与分层，弧线绕开主干，退到背景 ──────────────
+    // 可能关联：AI 猜的，还没被用户确认，用虚线退到背景
     {
-      selector: 'edge.related',
+      selector: 'edge.potential',
       style: {
         'line-color': p.related,
         'line-style': 'dashed',
         'curve-style': 'unbundled-bezier',
         'control-point-distance': 32,
-        'control-point-weight': 0.5,
-      } as never,
-    },
-    // 对照：易混淆，用紫色提醒「这两个别搞混」
-    {
-      selector: 'edge.contrast',
-      style: {
-        'line-color': p.contrast,
-        'line-style': 'dotted',
-        width: 1.6,
-        'curve-style': 'unbundled-bezier',
-        'control-point-distance': 38,
         'control-point-weight': 0.5,
       } as never,
     },

@@ -1,22 +1,25 @@
-"""双图谱 API（PLAN §3.4）。
+"""图谱 API。
 
-两张图人格不同：
-  · AI 概念图   —— "这个领域长什么样"（客观），只读为主
-  · 卡片图      —— "我怎么想的"（主观、有时间性），可拖拽可编辑
+这里原本是「双图谱」：AI 概念图（客观的领域结构）+ 卡片图（我怎么想的），
+外加一个把两者叠在一起的 overlay 视图。
 
-★ 叠加视图是杀手锏，不是附赠功能：AI 图做底图，用户卡片作为挂件钉在
-  对应概念旁，一眼看到「这个领域我啃过哪几块、哪几块一片空白」，
-  空白区域**反向驱动学习**。
+概念图整套已移除 —— 它的节点是从**小节正文**里抽出来的，学之前一片空白，
+撑不起「打开课程就知道要学什么」。那个职责交给了课程页的学习路径图
+（节点是小节，边是 sections.prerequisite_ids，大纲一出来就完整可用）。
+
+现在这里只剩两件事：
+  · 卡片图      —— 追问链与双链构成的「我的问题图」，可拖拽可编辑
+  · Workspace   —— 临时画布，"先画，后提交"
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 
 from app.api.cards import card_dict, link_dict
-from app.api.deps import CurrentUser, Scope, user_quota
+from app.api.deps import Scope
 from app.core.types import new_id, utcnow
 from app.models.card import (
     LINK_REAL,
@@ -26,14 +29,7 @@ from app.models.card import (
     CardLink,
 )
 from app.models.course import Chapter, Course, Section
-from app.models.graph import (
-    CardConcept,
-    Concept,
-    ConceptEdge,
-    Workspace,
-    WorkspaceEdge,
-    WorkspaceNode,
-)
+from app.models.graph import Workspace, WorkspaceEdge, WorkspaceNode
 
 router = APIRouter(prefix="/graph", tags=["graph"])
 
@@ -102,144 +98,6 @@ async def card_graph(
         ],
         "links": [link_dict(link) for link in links],
     }
-
-
-# ─────────────────────────────────────────────────────────────
-# AI 概念图
-# ─────────────────────────────────────────────────────────────
-@router.get("/concepts")
-async def concept_graph(scope: Scope, course_id: str | None = None) -> dict:
-    stmt = scope.select(Concept)
-    estmt = scope.select(ConceptEdge)
-    if course_id:
-        await scope.require(Course, course_id, "课程")
-        stmt = stmt.where(Concept.course_id == course_id)
-        estmt = estmt.where(ConceptEdge.course_id == course_id)
-
-    concepts = await scope.all(stmt)
-    edges = await scope.all(estmt)
-    ids = {c.id for c in concepts}
-
-    # 每个概念挂了多少张卡 —— 叠加视图的核心数据
-    counts = dict(
-        (
-            await scope.session.execute(
-                select(CardConcept.concept_id, func.count(CardConcept.card_id))
-                .join(Card, Card.id == CardConcept.card_id)
-                .where(
-                    CardConcept.user_id == scope.user_id,
-                    Card.user_id == scope.user_id,
-                    Card.state != STATE_ARCHIVED,
-                )
-                .group_by(CardConcept.concept_id)
-            )
-        ).all()
-    )
-    rewritten = dict(
-        (
-            await scope.session.execute(
-                select(CardConcept.concept_id, func.count(CardConcept.card_id))
-                .join(Card, Card.id == CardConcept.card_id)
-                .where(
-                    CardConcept.user_id == scope.user_id,
-                    Card.user_id == scope.user_id,
-                    Card.is_rewritten.is_(True),
-                )
-                .group_by(CardConcept.concept_id)
-            )
-        ).all()
-    )
-
-    return {
-        "nodes": [
-            {
-                "id": c.id,
-                "label": c.name,
-                "description": c.description,
-                "section_id": c.section_id,
-                "course_id": c.course_id,
-                "card_count": int(counts.get(c.id, 0)),
-                "rewritten_count": int(rewritten.get(c.id, 0)),
-            }
-            for c in concepts
-        ],
-        "edges": [
-            {"id": e.id, "from": e.from_concept, "to": e.to_concept, "relation": e.relation}
-            for e in edges
-            if e.from_concept in ids and e.to_concept in ids
-        ],
-    }
-
-
-@router.get("/overlay")
-async def overlay(scope: Scope, course_id: str) -> dict:
-    """★ 叠加视图。
-
-    AI 概念图做底图（浅色），卡片作为挂件钉在对应概念节点旁。
-    卡片密集区 = 困难区 = 复习优先区；
-    空白区 = 一个问题都没提过 = 反向驱动学习的入口。
-    """
-    await scope.require(Course, course_id, "课程")
-    concepts = await concept_graph(scope, course_id)
-
-    pairs = list(
-        (
-            await scope.session.execute(
-                select(CardConcept.concept_id, CardConcept.card_id, Card.is_rewritten, Card.summary)
-                .join(Card, Card.id == CardConcept.card_id)
-                .where(
-                    CardConcept.user_id == scope.user_id,
-                    Card.user_id == scope.user_id,
-                    Card.state != STATE_ARCHIVED,
-                )
-            )
-        ).all()
-    )
-    attach: dict[str, list[dict]] = {}
-    for concept_id, card_id, is_rw, summary in pairs:
-        attach.setdefault(concept_id, []).append(
-            {"card_id": card_id, "is_rewritten": bool(is_rw), "label": summary or ""}
-        )
-
-    covered = {n["id"] for n in concepts["nodes"] if n["card_count"] > 0}
-    blank = [n for n in concepts["nodes"] if n["id"] not in covered]
-
-    return {
-        **concepts,
-        "attachments": attach,
-        # 这份 blank_spots 直接驱动「要生成一节强化课吗」的提示
-        "blank_spots": [{"id": n["id"], "label": n["label"]} for n in blank],
-        "coverage": round(len(covered) / len(concepts["nodes"]), 3) if concepts["nodes"] else 0.0,
-    }
-
-
-@router.post("/reinforce")
-async def reinforce(
-    scope: Scope, user: CurrentUser, course_id: str, concept: str = Query(max_length=200)
-) -> dict:
-    """从图上的空白处一键生成强化课（PLAN §3.4 / v0.2 交付标准）。"""
-    from app.models.course import COURSE_OUTLINING
-    from app.services.course import generate_outline
-
-    parent = await scope.require(Course, course_id, "课程")
-    new_course = Course(
-        id=new_id(),
-        user_id=scope.user_id,
-        topic=f"{concept}（{parent.title} 强化）",
-        title=f"{concept} 强化",
-        level=parent.level,
-        status=COURSE_OUTLINING,
-        meta={
-            "reinforce_of": parent.id,
-            "extra": f"这是针对「{concept}」的专项强化课，学习者在《{parent.title}》中"
-            f"对这块还没有提出过任何问题，说明可能存在盲区。请聚焦这一个概念展开，"
-            f"不要泛讲整个领域。",
-        },
-    )
-    scope.add(new_course)
-    await scope.commit()
-    await generate_outline(scope, new_course, quota=user_quota(user))
-    return {"course_id": new_course.id, "title": new_course.title}
 
 
 # ─────────────────────────────────────────────────────────────

@@ -19,7 +19,6 @@ from app.api.deps import Scope
 from app.core.types import utcnow
 from app.models.card import STATE_ARCHIVED, Card, CardLink
 from app.models.course import Chapter, Course, Section
-from app.models.graph import Concept, ConceptEdge
 from app.models.learning import Pomodoro, ReviewState
 
 router = APIRouter(prefix="/export", tags=["export"])
@@ -35,8 +34,6 @@ async def export_json(scope: Scope) -> Response:
     cards = await scope.all(scope.select(Card).order_by(Card.created_at))
     links = await scope.all(scope.select(CardLink))
     courses = await scope.all(scope.select(Course).order_by(Course.created_at))
-    concepts = await scope.all(scope.select(Concept))
-    concept_edges = await scope.all(scope.select(ConceptEdge))
     pomodoros = await scope.all(scope.select(Pomodoro).order_by(Pomodoro.started_at))
     reviews = await scope.all(
         select(ReviewState).where(ReviewState.user_id == scope.user_id)
@@ -66,6 +63,8 @@ async def export_json(scope: Scope) -> Response:
                                 "title": s.title,
                                 "summary": s.summary,
                                 "key_concepts": list(s.key_concepts or []),
+                                # 学习路径图的边：指向本节的前置小节 id
+                                "prerequisite_ids": list(s.prerequisite_ids or []),
                                 "content_md": s.content_md,
                                 "completed_at": (
                                     s.completed_at.isoformat() if s.completed_at else None
@@ -120,14 +119,6 @@ async def export_json(scope: Scope) -> Response:
                 "created_by": link.created_by,
             }
             for link in links
-        ],
-        "concepts": [
-            {"id": c.id, "name": c.name, "description": c.description, "course_id": c.course_id}
-            for c in concepts
-        ],
-        "concept_edges": [
-            {"from": e.from_concept, "to": e.to_concept, "relation": e.relation}
-            for e in concept_edges
         ],
         "pomodoros": [
             {

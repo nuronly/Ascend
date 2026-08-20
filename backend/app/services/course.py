@@ -30,32 +30,9 @@ from app.models.course import (
     Course,
     Section,
 )
-from app.models.graph import Concept, ConceptEdge
 from app.services import prompts
 
 log = logging.getLogger(__name__)
-
-_CONCEPT_BLOCK = re.compile(
-    re.escape(prompts.CONCEPT_OPEN) + r"(.*?)" + re.escape(prompts.CONCEPT_CLOSE),
-    re.S,
-)
-
-
-def split_concepts(raw: str) -> tuple[str, dict]:
-    """把正文与尾部概念块拆开。
-
-    概念块解析失败是可以容忍的——正文照常显示，只是这一节暂时不进概念图。
-    绝不能因为一个 JSON 括号写错就让用户看不到内容。
-    """
-    m = _CONCEPT_BLOCK.search(raw)
-    if not m:
-        return raw.strip(), {}
-    body = _CONCEPT_BLOCK.sub("", raw).strip()
-    try:
-        return body, json.loads(m.group(1).strip())
-    except json.JSONDecodeError:
-        log.warning("小节概念块解析失败，正文照常返回")
-        return body, {}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -197,6 +174,13 @@ async def _persist_outline(scope: UserScope, course: Course, data: dict) -> Cour
         await scope.commit()
         raise ValueError(course.error)
 
+    # ── 第一趟：建章与节，同时记下 sid → Section 的对应 ──
+    # 依赖要等所有小节都拿到真实 id 才能回填，所以必须拆成两趟。
+    # 模型给的 sid（"1.1"）只是它自己那份 JSON 里的临时编号，不入库。
+    by_sid: dict[str, Section] = {}
+    order: list[Section] = []  # 按 (章序, 节序) 排好的自然学习顺序
+    raw_prereq: dict[str, list[str]] = {}  # section.id → 模型给的 sid 列表
+
     for ci, ch in enumerate(chapters_in):
         chapter = Chapter(
             id=new_id(),
@@ -209,17 +193,46 @@ async def _persist_outline(scope: UserScope, course: Course, data: dict) -> Cour
         # sections 有指向 chapters 的外键，先 flush 保证插入顺序
         await scope.flush()
         for si, sec in enumerate(ch.get("sections") or []):
-            scope.add(
-                Section(
-                    id=new_id(),
-                    chapter_id=chapter.id,
-                    idx=si,
-                    title=(sec.get("title") or f"{ci + 1}.{si + 1}").strip()[:500],
-                    summary=(sec.get("summary") or "").strip(),
-                    key_concepts=[str(k) for k in (sec.get("key_concepts") or [])][:8],
-                    prerequisite_ids=[str(k) for k in (sec.get("prerequisite_ids") or [])][:8],
-                )
+            section = Section(
+                id=new_id(),
+                chapter_id=chapter.id,
+                idx=si,
+                title=(sec.get("title") or f"{ci + 1}.{si + 1}").strip()[:500],
+                summary=(sec.get("summary") or "").strip(),
+                key_concepts=[str(k) for k in (sec.get("key_concepts") or [])][:8],
             )
+            scope.add(section)
+            order.append(section)
+
+            sid = str(sec.get("sid") or "").strip() or f"{ci + 1}.{si + 1}"
+            # 模型偶尔会给出重复 sid，先到先得
+            by_sid.setdefault(sid, section)
+            # prerequisites 是新字段名；prerequisite_ids 是旧的，一并认
+            deps_raw = sec.get("prerequisites")
+            if deps_raw is None:
+                deps_raw = sec.get("prerequisite_ids")
+            raw_prereq[section.id] = [str(x).strip() for x in (deps_raw or [])][:8]
+
+    # ── 第二趟：把 sid 翻成真实 section id ──
+    # ★ 只保留指向「更早小节」的边。这一条约束同时解决三件事：
+    #   1. 天然无环 —— 有环的路径图会彻底失去方向感，dagre 只能瞎猜层级
+    #   2. 符合「前置」语义 —— 前置知识不可能排在它后面
+    #   3. 模型偶发的反向依赖被直接剪掉，不必再单独做环检测
+    rank = {s.id: i for i, s in enumerate(order)}
+    dropped = 0
+    for s in order:
+        deps: list[str] = []
+        for sid in raw_prereq.get(s.id, []):
+            target = by_sid.get(sid)
+            if target is None or target.id == s.id or rank[target.id] >= rank[s.id]:
+                dropped += 1
+                continue
+            if target.id not in deps:
+                deps.append(target.id)
+        s.prerequisite_ids = deps
+
+    if dropped:
+        log.info("剪掉 %d 条无效依赖（指向不存在的小节、自身，或排在后面的小节）", dropped)
 
     course.status = COURSE_READY
     course.error = None
@@ -286,13 +299,7 @@ async def stream_section_content(
 
     yield {"event": "start", "data": {"section_id": section.id, "title": section.title}}
 
-    # 概念块是给机器看的，绝不能闪现在用户眼前。
-    # 难点：`<!--LADDER_CONCEPTS` 很可能被切分在两个 chunk 中间，
-    # 所以永远保留末尾一个哨兵长度的窗口不发出，直到确认它不是块开头。
-    guard = len(prompts.CONCEPT_OPEN)
     buf: list[str] = []
-    sent = 0
-    halted = False
     thinking_chars = 0
     try:
         async for chunk in stream_chat(
@@ -309,23 +316,13 @@ async def stream_section_content(
         ):
             if chunk.done:
                 break
-            # 思维链透出为思考信号，不进 buf —— 概念块过滤只管正文
+            # 思维链只作为「正在思考」信号透出，不进正文
             if chunk.reasoning:
                 thinking_chars += len(chunk.reasoning)
                 yield {"event": "thinking", "data": {"chars": thinking_chars}}
                 continue
             buf.append(chunk.delta)
-            if halted:
-                continue
-            full = "".join(buf)
-            at = full.find(prompts.CONCEPT_OPEN)
-            if at != -1:
-                emit_to, halted = at, True
-            else:
-                emit_to = max(sent, len(full) - guard)
-            if emit_to > sent:
-                yield {"event": "delta", "data": {"text": full[sent:emit_to]}}
-                sent = emit_to
+            yield {"event": "delta", "data": {"text": chunk.delta}}
     except Exception as exc:
         section.content_status = SECTION_FAILED
         await scope.commit()
@@ -333,23 +330,15 @@ async def stream_section_content(
         yield {"event": "error", "data": {"message": str(exc)[:500]}}
         return
 
-    raw = "".join(buf)
-    body, concept_data = split_concepts(raw)
-
+    body = "".join(buf).strip()
     section.content_md = body
     section.content_status = SECTION_READY
     section.generated_at = utcnow()
-    if names := [c.get("name") for c in (concept_data.get("concepts") or []) if c.get("name")]:
-        section.key_concepts = names[:12]
     await scope.commit()
 
-    if concept_data:
-        try:
-            await _persist_concepts(scope, course.id, section.id, concept_data)
-        except Exception:
-            log.exception("概念图写入失败（不影响正文）")
-
-    # 正文里的概念块被过滤掉了，最后把干净全文发一次让前端对齐
+    # 落库后把全文再发一次，让前端与服务端对齐。
+    # （原来这一步还负责剔掉尾部概念块；概念块已废除，正文就是纯 Markdown，
+    #   但事件保留 —— 前端靠它做最终一致性校正。）
     yield {"event": "content", "data": {"markdown": body}}
     yield {
         "event": "done",
@@ -357,77 +346,6 @@ async def stream_section_content(
     }
 
 
-async def _persist_concepts(
-    scope: UserScope, course_id: str, section_id: str, data: dict
-) -> None:
-    """把抽取到的概念写入 AI 概念图（v0.2 叠加视图的底图）。"""
-    existing = {
-        c.norm_name: c
-        for c in await scope.all(
-            select(Concept).where(
-                Concept.course_id == course_id, Concept.user_id == scope.user_id
-            )
-        )
-    }
-
-    for item in (data.get("concepts") or [])[:20]:
-        name = str(item.get("name") or "").strip()
-        if not name:
-            continue
-        key = name.lower()
-        if key in existing:
-            if desc := str(item.get("description") or "").strip():
-                if not existing[key].description:
-                    existing[key].description = desc
-            continue
-        c = Concept(
-            id=new_id(),
-            user_id=scope.user_id,
-            course_id=course_id,
-            name=name[:200],
-            norm_name=key[:200],
-            description=str(item.get("description") or "").strip(),
-            section_id=section_id,
-            created_at=utcnow(),
-        )
-        scope.add(c)
-        existing[key] = c
-
-    await scope.flush()
-
-    seen: set[tuple[str, str, str]] = set()
-    for rel in (data.get("relations") or [])[:40]:
-        a = existing.get(str(rel.get("from") or "").strip().lower())
-        b = existing.get(str(rel.get("to") or "").strip().lower())
-        if not a or not b or a.id == b.id:
-            continue
-        kind = str(rel.get("relation") or "related")
-        if kind not in {"prerequisite", "part_of", "related", "contrast"}:
-            kind = "related"
-        sig = (a.id, b.id, kind)
-        if sig in seen:
-            continue
-        seen.add(sig)
-        dup = await scope.session.scalar(
-            select(ConceptEdge.id).where(
-                ConceptEdge.from_concept == a.id,
-                ConceptEdge.to_concept == b.id,
-                ConceptEdge.relation == kind,
-            )
-        )
-        if dup:
-            continue
-        scope.add(
-            ConceptEdge(
-                id=new_id(),
-                user_id=scope.user_id,
-                course_id=course_id,
-                from_concept=a.id,
-                to_concept=b.id,
-                relation=kind,
-            )
-        )
-    await scope.commit()
 
 
 async def suggest_topics(scope: UserScope, seed: str = "") -> list[str]:

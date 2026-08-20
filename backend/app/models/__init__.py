@@ -36,14 +36,7 @@ from app.models.course import (
     Section,
 )
 from app.models.document import DocBlock, Document
-from app.models.graph import (
-    CardConcept,
-    Concept,
-    ConceptEdge,
-    Workspace,
-    WorkspaceEdge,
-    WorkspaceNode,
-)
+from app.models.graph import Workspace, WorkspaceEdge, WorkspaceNode
 from app.models.learning import (
     POMO_ABANDONED,
     POMO_COMPLETED,
@@ -66,13 +59,10 @@ __all__ = [
     "COURSE_OUTLINING",
     "COURSE_READY",
     "Card",
-    "CardConcept",
     "CardLink",
     "CardMessage",
     "CardSearch",
     "Chapter",
-    "Concept",
-    "ConceptEdge",
     "Course",
     "DocBlock",
     "Document",

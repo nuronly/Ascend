@@ -4,25 +4,25 @@ import { useQuery } from '@tanstack/react-query'
 import cytoscape, { type Core, type ElementDefinition } from 'cytoscape'
 import { api } from '@/lib/api'
 import { toast } from '@/lib/store'
-import type { Card, CardGraphNode, CardLink, Course, OverlayData } from '@/lib/types'
+import type { Card, CardGraphNode, CardLink, Course } from '@/lib/types'
 import { RELATION_COLORS, RELATION_LABELS } from '@/lib/types'
-import { Badge, Button, Empty, Modal, Progress, Segmented, Spinner } from '@/components/ui'
+import { Badge, Button, Empty, Modal, Progress, Spinner } from '@/components/ui'
 import { cn, relativeTime, truncate } from '@/lib/utils'
-import { type GraphView as View, runLayout } from '@/lib/graphLayout'
+import { runCardLayout } from '@/lib/graphLayout'
 import { DARK, LIGHT, makeStylesheet } from '@/lib/graphTheme'
 import { reportGuideStep } from '@/lib/guide'
 import { useIsDark } from '@/lib/useTheme'
 
 /**
- * 双图谱（PLAN §3.4）
+ * 问题图 —— "我追问出来的思考轨迹"（主观、有时间性）。
  *
- * 三个视图人格不同，各自只回答一个问题：
- *   概念图 —— "这个领域长什么样、该按什么顺序学"（客观，不掺学习状态）
- *   问题图 —— "我追问出来的思考轨迹"（主观、有时间性）
- *   进度   —— "我啃到哪了、哪里还是空白"，空白区反向驱动学习
+ * 这里曾经是「双图谱」：还有一张从正文里抽取概念的 AI 概念图，以及把两者
+ * 叠起来的进度视图。它们已经移除 —— 概念要等正文生成才有，学之前一片空白，
+ * 撑不起「这门课要学什么」。那个职责现在归课程页的学习路径图
+ * （节点是小节，大纲一出来就完整可用）。
  *
- * 三者共用一套分层布局（lib/graphLayout），但骨架边不同 ——
- * 布局的语义就是视图的语义。配色见 lib/graphTheme。
+ * 这张图留下来的理由恰恰相反：它记录的东西**只能事后长出来**，
+ * 而且跨课程撞上的关联是整个第二大脑最值钱的部分。
  */
 
 export default function GraphPage() {
@@ -45,9 +45,9 @@ function GraphPicker() {
   return (
     <div className="h-full overflow-y-auto">
       <div className="max-w-3xl mx-auto px-6 py-8">
-        <h1 className="text-[18px] font-semibold tracking-[-0.01em]">图谱</h1>
+        <h1 className="text-[18px] font-semibold tracking-[-0.01em]">问题图</h1>
         <p className="text-[13px] text-[var(--text-muted)] mt-1.5 leading-relaxed">
-          每门课有三张图：领域该怎么学、你啃到哪了、你追问出了什么。挑一门进去看。
+          你划词追问出来的每一张卡，连成一张思考轨迹图。挑一门课看它的，或者把所有课放进同一张图。
         </p>
 
         {isLoading ? (
@@ -56,7 +56,7 @@ function GraphPicker() {
           </div>
         ) : !courses?.length ? (
           <div className="mt-10">
-            <Empty title="还没有课程" hint="先去首页开一门课，图谱会随着你的学习自己长出来。" />
+            <Empty title="还没有课程" hint="先去首页开一门课，边读边划词提问，图就会自己长出来。" />
           </div>
         ) : (
           <div className="mt-6 space-y-2.5">
@@ -76,7 +76,7 @@ function GraphPicker() {
                   <span className="tabular-nums">
                     {c.stats.completed ?? 0}/{c.stats.sections ?? 0} 节
                   </span>
-                  {/* 卡片数是图谱页最该关心的：没有卡片，图谱就只是 AI 的独白 */}
+                  {/* 卡片数是这一页最该关心的：没有卡片，图就是空的 */}
                   {!!c.stats.cards && (
                     <>
                       <span className="opacity-40">·</span>
@@ -132,7 +132,6 @@ interface HoverInfo {
   x: number
   y: number
   title: string
-  desc?: string
   meta?: string
 }
 
@@ -149,11 +148,9 @@ function GraphCanvas({ courseId }: { courseId: string }) {
 
   // /graph/all 是"跨课程问题图"的伪 id
   const allMode = courseId === 'all'
-  const [view, setView] = useState<View>(allMode ? 'cards' : 'overlay')
-  const [selected, setSelected] = useState<{ type: 'concept' | 'card'; id: string } | null>(null)
+  const [selectedId, setSelectedId] = useState<string | null>(null)
   const [cardDetail, setCardDetail] = useState<Card | null>(null)
   const [hover, setHover] = useState<HoverInfo | null>(null)
-  const [reinforcing, setReinforcing] = useState('')
   // 画布初始化失败时把错误摆出来 —— 空白画布和「没数据」长得一模一样，
   // 没有错误显示就永远分不清是渲染挂了还是真空（这个亏吃过三次）
   const [renderError, setRenderError] = useState('')
@@ -165,13 +162,7 @@ function GraphCanvas({ courseId }: { courseId: string }) {
   })
   const course = courses?.find((c) => c.id === courseId)
 
-  const { data: overlay, isLoading: loadingOverlay } = useQuery({
-    queryKey: ['overlay', courseId],
-    queryFn: () => api.get<OverlayData>(`/graph/overlay?course_id=${courseId}`),
-    enabled: !allMode && view !== 'cards',
-  })
-
-  const { data: cardGraph, isLoading: loadingCards } = useQuery({
+  const { data: cardGraph, isLoading } = useQuery({
     queryKey: ['card-graph', allMode ? null : courseId],
     queryFn: () =>
       api.get<{
@@ -179,81 +170,46 @@ function GraphCanvas({ courseId }: { courseId: string }) {
         parent_edges: { from: string; to: string }[]
         links: CardLink[]
       }>(`/graph/cards${allMode ? '' : `?course_id=${courseId}`}`),
-    enabled: view === 'cards',
   })
 
   const elements: ElementDefinition[] = useMemo(() => {
     const els: ElementDefinition[] = []
+    if (!cardGraph) return els
 
-    if (view === 'cards' && cardGraph) {
-      for (const n of cardGraph.nodes) {
-        els.push({
-          data: {
-            id: n.id,
-            label: truncate(n.label || '未命名', 12),
-            full: n.label || '未命名',
-            size: 20 + Math.min(n.touch_count, 8) * 1.8 - n.depth * 1.2,
-            kind: 'card',
-            meta: `追问深度 ${n.depth} · 碰过 ${n.touch_count} 次${n.is_rewritten ? ' · 已写己见' : ''}`,
-          },
-          classes: cn('card', n.is_rewritten && 'rewritten', n.depth === 0 && 'root'),
-        })
-      }
-      const ids = new Set(cardGraph.nodes.map((n) => n.id))
-      for (const e of cardGraph.parent_edges) {
-        if (ids.has(e.from) && ids.has(e.to))
-          els.push({
-            data: { id: `p-${e.from}-${e.to}`, source: e.from, target: e.to },
-            classes: 'parent',
-          })
-      }
-      for (const l of cardGraph.links) {
-        if (ids.has(l.from_card_id) && ids.has(l.to_card_id))
-          els.push({
-            data: {
-              id: `l-${l.id}`,
-              source: l.from_card_id,
-              target: l.to_card_id,
-              relation: l.relation,
-            },
-            classes: l.kind,
-          })
-      }
-      return els
-    }
-
-    if (!overlay) return els
-
-    const isOverlay = view === 'overlay'
-    for (const n of overlay.nodes) {
+    for (const n of cardGraph.nodes) {
       els.push({
         data: {
           id: n.id,
-          label: truncate(n.label, 12),
-          full: n.label,
-          desc: n.description || '',
-          // 进度视图用大小表达"提过几个问题"；概念图不掺学习状态，统一大小
-          size: isOverlay ? 22 + Math.min(n.card_count, 8) * 2.4 : 26,
-          kind: 'concept',
-          meta: isOverlay
-            ? n.card_count
-              ? `${n.card_count} 张卡${n.rewritten_count ? ` · ${n.rewritten_count} 张有己见` : ''}`
-              : '还没提过问题'
-            : '',
+          label: truncate(n.label || '未命名', 12),
+          full: n.label || '未命名',
+          size: 20 + Math.min(n.touch_count, 8) * 1.8 - n.depth * 1.2,
+          meta: `追问深度 ${n.depth} · 碰过 ${n.touch_count} 次${n.is_rewritten ? ' · 已写己见' : ''}`,
         },
-        classes: cn(
-          'concept',
-          isOverlay && 'overlay',
-          isOverlay &&
-            (n.rewritten_count > 0 ? 'owned' : n.card_count > 0 ? 'covered' : 'blank'),
-        ),
+        classes: cn('card', n.is_rewritten && 'rewritten', n.depth === 0 && 'root'),
       })
     }
-    for (const e of overlay.edges) {
-      els.push({ data: { id: e.id, source: e.from, target: e.to }, classes: e.relation })
+    const ids = new Set(cardGraph.nodes.map((n) => n.id))
+    for (const e of cardGraph.parent_edges) {
+      if (ids.has(e.from) && ids.has(e.to))
+        els.push({
+          data: { id: `p-${e.from}-${e.to}`, source: e.from, target: e.to },
+          classes: 'parent',
+        })
+    }
+    for (const l of cardGraph.links) {
+      if (ids.has(l.from_card_id) && ids.has(l.to_card_id))
+        els.push({
+          data: {
+            id: `l-${l.id}`,
+            source: l.from_card_id,
+            target: l.to_card_id,
+            relation: l.relation,
+          },
+          classes: l.kind,
+        })
     }
     return els
-  }, [view, overlay, cardGraph])
+  }, [cardGraph])
 
   // 判空必须看「节点数」而不是 elements 长度：若后端返回了边却没有对应节点，
   // elements 非空但画布上一个东西都没有，此时既不显示空状态、也没有图，
@@ -289,7 +245,7 @@ function GraphCanvas({ courseId }: { courseId: string }) {
         container: box,
         elements,
         style: makeStylesheet(dark ? DARK : LIGHT),
-        layout: { name: 'preset' }, // 真正的布局在下面按视图分派
+        layout: { name: 'preset' }, // 真正的布局在下面
         minZoom: 0.15,
         maxZoom: 3,
         wheelSensitivity: 0.22,
@@ -297,7 +253,7 @@ function GraphCanvas({ courseId }: { courseId: string }) {
       cyRef.current = cy
       touchedRef.current = false
 
-      runLayout(cy, view)
+      runCardLayout(cy)
 
       // 自检：布局后节点位置必须有限且散开，否则就是渲染管线出了问题
       const bb = cy.elements().boundingBox()
@@ -334,15 +290,14 @@ function GraphCanvas({ courseId }: { courseId: string }) {
 
     cy.on('tap', 'node', (e) => {
       const n = e.target
-      const kind = n.data('kind')
-      setSelected({ type: kind === 'card' ? 'card' : 'concept', id: n.id() })
+      setSelectedId(n.id())
       cy.elements().addClass('dimmed')
       n.closedNeighborhood().removeClass('dimmed')
     })
 
     cy.on('tap', (e) => {
       if (e.target === cy) {
-        setSelected(null)
+        setSelectedId(null)
         cy.elements().removeClass('dimmed')
       }
     })
@@ -355,7 +310,6 @@ function GraphCanvas({ courseId }: { courseId: string }) {
         x: pos.x,
         y: pos.y - (n.renderedHeight() / 2 + 10),
         title: n.data('full') || n.data('label'),
-        desc: n.data('desc') || undefined,
         meta: n.data('meta') || undefined,
       })
       box.style.cursor = 'pointer'
@@ -369,9 +323,7 @@ function GraphCanvas({ courseId }: { courseId: string }) {
     cy.on('pan zoom drag', () => setHover(null))
 
     cy.on('dbltap', 'node', (e) => {
-      if (e.target.data('kind') === 'card') {
-        api.get<Card>(`/cards/${e.target.id()}`).then(setCardDetail).catch(() => {})
-      }
+      api.get<Card>(`/cards/${e.target.id()}`).then(setCardDetail).catch(() => {})
     })
 
     // 容器尺寸变化（首屏 flex 未稳定、窗口缩放、侧栏展开）都要重新适配，
@@ -388,27 +340,11 @@ function GraphCanvas({ courseId }: { courseId: string }) {
       cy.destroy()
       cyRef.current = null
     }
-  }, [elements, nodeCount, view, dark, fit, retryTick])
+  }, [elements, nodeCount, dark, fit, retryTick])
 
-  const reinforce = async (concept: string) => {
-    setReinforcing(concept)
-    try {
-      const r = await api.post<{ course_id: string; title: string }>(
-        `/graph/reinforce?course_id=${courseId}&concept=${encodeURIComponent(concept)}`,
-      )
-      toast.ok('已生成强化课')
-      nav(`/courses/${r.course_id}`)
-    } catch (e: any) {
-      toast.error(e?.message ?? '生成失败')
-    } finally {
-      setReinforcing('')
-    }
-  }
-
-  const loading = view === 'cards' ? loadingCards : loadingOverlay
-  const selectedConcept =
-    selected?.type === 'concept' ? overlay?.nodes.find((n) => n.id === selected.id) : null
-  const conceptCards = (selectedConcept && overlay?.attachments[selectedConcept.id]) || []
+  const selectedCard = selectedId
+    ? cardGraph?.nodes.find((n) => n.id === selectedId) ?? null
+    : null
 
   return (
     <div className="h-full flex flex-col">
@@ -418,56 +354,26 @@ function GraphCanvas({ courseId }: { courseId: string }) {
           onClick={() => nav('/graph')}
           className="text-[13px] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"
         >
-          图谱
+          问题图
         </button>
         <span className="text-[var(--text-subtle)] opacity-50">/</span>
         <h1 className="text-[14px] font-semibold tracking-[-0.01em] max-w-[280px] truncate">
-          {allMode ? '全部问题图' : course?.title || course?.topic || '…'}
+          {allMode ? '全部课程' : course?.title || course?.topic || '…'}
         </h1>
-
-        {!allMode && (
-          <Segmented
-            value={view}
-            onChange={setView}
-            options={[
-              { value: 'overlay', label: '进度', title: '我啃到哪了、哪里还是空白' },
-              { value: 'concepts', label: '概念图', title: '这个领域长什么样、该按什么顺序学' },
-              { value: 'cards', label: '问题图', title: '我追问出来的思考轨迹' },
-            ]}
-          />
-        )}
 
         <div className="grow" />
 
-        {view === 'overlay' && overlay && (
-          <span className="flex items-center gap-2 text-[12px] text-[var(--text-muted)]">
-            <span
-              className="w-20 h-1 rounded-full overflow-hidden bg-[var(--bg-sunken)] shrink-0"
-              title={`${overlay.nodes.length - overlay.blank_spots.length} / ${overlay.nodes.length} 个概念提过问题`}
-            >
-              <span
-                className="block h-full rounded-full transition-[width] duration-500"
-                style={{
-                  width: `${Math.round(overlay.coverage * 100)}%`,
-                  background: 'var(--sem-rewritten)',
-                }}
-              />
-            </span>
-            <span>
-              <b className="tabular-nums text-[var(--text)]">
-                {Math.round(overlay.coverage * 100)}%
-              </b>
-              <span className="mx-1.5 opacity-40">·</span>
-              {overlay.blank_spots.length} 块空白
-            </span>
-          </span>
+        {!allMode && course && (
+          <Button size="xs" variant="ghost" onClick={() => nav(`/courses/${courseId}`)}>
+            回到课程
+          </Button>
         )}
       </header>
 
       <div className="grow min-h-0 flex">
         {/* 画布 */}
         <div className="relative grow min-w-0" style={{ background: 'var(--graph-bg)' }}>
-          {loading ? (
+          {isLoading ? (
             <div className="absolute inset-0 flex items-center justify-center">
               <Spinner className="size-5 text-[var(--text-subtle)]" />
             </div>
@@ -476,9 +382,7 @@ function GraphCanvas({ courseId }: { courseId: string }) {
               <div className="text-center max-w-sm px-6">
                 <div className="text-[14px] font-medium text-[var(--text)]">图还是空的</div>
                 <div className="text-[13px] text-[var(--text-muted)] mt-2 leading-relaxed">
-                  {view === 'cards'
-                    ? '把卡片收进仓库后，它们就会出现在这里，连成你自己的问题网络。'
-                    : '生成一节课的正文，AI 会顺手抽出这个领域的概念结构。'}
+                  把卡片收进仓库后，它们就会出现在这里，连成你自己的问题网络。
                 </div>
               </div>
             </div>
@@ -489,7 +393,7 @@ function GraphCanvas({ courseId }: { courseId: string }) {
             .cytoscape_container { position: relative }（同特异性、后注入胜出），
             把 absolute 顶掉之后 inset-0 只剩偏移、不再拉伸 ——
             父级高度正常，容器却塌成宽×0，节点全压在 y=0 一条线上。
-            这就是「概念图空白」追了三天的根因。
+            这就是「图谱空白」追了三天的根因。
             用 size-full 让 cytoscape 自己的 relative 正好工作。
           */}
           <div ref={boxRef} className="size-full" />
@@ -529,28 +433,11 @@ function GraphCanvas({ courseId }: { courseId: string }) {
               }}
             >
               <div className="text-[13px] font-semibold leading-snug">{hover.title}</div>
-              {hover.desc && (
-                <div className="text-[12px] text-[var(--text-muted)] mt-1 leading-relaxed line-clamp-3">
-                  {hover.desc}
-                </div>
-              )}
               {hover.meta && (
                 <div className="text-[11.5px] text-[var(--text-subtle)] mt-1.5">{hover.meta}</div>
               )}
             </div>
           )}
-
-          {/* 一门新课满屏空心球时，得说清这些球是什么、怎么点亮 */}
-          {view === 'overlay' && overlay?.nodes.length && overlay.coverage === 0 ? (
-            <div className="absolute top-4 left-1/2 -translate-x-1/2 max-w-md px-4 text-center pointer-events-none">
-              <div className="text-[13px] text-[var(--text-muted)]">
-                这门课你还没提过任何问题
-              </div>
-              <div className="text-[12px] text-[var(--text-subtle)] mt-1 leading-relaxed">
-                每个空心球是一个概念。去读一节、划词提问，对应的球就会亮起来。
-              </div>
-            </div>
-          ) : null}
 
           {/* 缩放控件 */}
           <div className="absolute right-3 bottom-3 flex flex-col gap-1">
@@ -567,189 +454,90 @@ function GraphCanvas({ courseId }: { courseId: string }) {
 
           {/* 图例 */}
           <div className="absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1.5 text-[10.5px] text-[var(--text-subtle)] max-w-[62%] pointer-events-none">
-            {view === 'cards' ? (
-              <>
-                <Legend color="#a7f3d0" ring="#10b981" label="己见卡" />
-                <Legend line="#c3cbd6" label="追问链" />
-                <Legend line="#f59e0b" label="正式关联" />
-                <Legend line="#cbd5e1" label="可能关联" lineStyle="dashed" />
-                <span className="opacity-70">左→右 = 追问的深度</span>
-              </>
-            ) : view === 'overlay' ? (
-              <>
-                <Legend color="transparent" ring="#cbd5e1" label="空白" dashed />
-                <Legend color="#bfdbfe" ring="#60a5fa" label="提过问题" />
-                <Legend color="#a7f3d0" ring="#10b981" label="有己见" />
-                <span className="opacity-70">球越大 = 提过的问题越多</span>
-              </>
-            ) : (
-              <>
-                <Legend line="#7dabf8" label="前置" />
-                <Legend line="#c3cbd6" label="组成" />
-                <Legend line="#cbd5e1" label="相关" lineStyle="dashed" />
-                <Legend line="#d8b4fe" label="对照" lineStyle="dotted" />
-                <span className="opacity-70">上→下 = 学习顺序</span>
-              </>
-            )}
+            <Legend color="#a7f3d0" ring="#10b981" label="己见卡" />
+            <Legend line="#c3cbd6" label="追问链" />
+            <Legend line="#f59e0b" label="正式关联" />
+            <Legend line="#cbd5e1" label="可能关联" lineStyle="dashed" />
+            <span className="opacity-70">左→右 = 追问的深度</span>
           </div>
         </div>
 
         {/* 侧栏 */}
         <aside className="w-[280px] shrink-0 border-l border-[var(--border)] overflow-y-auto">
-          {selectedConcept ? (
+          {selectedCard ? (
             <div className="p-4">
-              <div className="text-[14px] font-semibold">{selectedConcept.label}</div>
-              {selectedConcept.description && (
-                <p className="text-[12.5px] text-[var(--text-muted)] leading-relaxed mt-2">
-                  {selectedConcept.description}
-                </p>
+              <div className="text-[13.5px] font-semibold leading-snug">
+                {selectedCard.label || '未命名'}
+              </div>
+              <div className="flex flex-wrap gap-1.5 mt-2.5">
+                <Badge>追问深度 {selectedCard.depth}</Badge>
+                {selectedCard.touch_count > 1 && (
+                  <Badge>碰过 {selectedCard.touch_count} 次</Badge>
+                )}
+                {selectedCard.is_rewritten && <Badge tone="rewritten">己见</Badge>}
+              </div>
+
+              {!!selectedCard.concept_tags?.length && (
+                <div className="flex flex-wrap gap-1 mt-3">
+                  {selectedCard.concept_tags.slice(0, 6).map((t) => (
+                    <span
+                      key={t}
+                      className="px-1.5 py-0.5 text-[11px] rounded-[5px] bg-[var(--bg-sunken)] text-[var(--text-muted)]"
+                    >
+                      {t}
+                    </span>
+                  ))}
+                </div>
               )}
 
-              {/* 学习状态只在进度视图出现，概念图保持"客观地图"的人格 */}
-              {view === 'overlay' && (
-                <>
-                  <div className="flex gap-1.5 mt-3">
-                    <Badge tone={selectedConcept.card_count ? 'accent' : 'neutral'}>
-                      {selectedConcept.card_count} 张卡
-                    </Badge>
-                    {selectedConcept.rewritten_count > 0 && (
-                      <Badge tone="rewritten">{selectedConcept.rewritten_count} 己见</Badge>
-                    )}
-                  </div>
+              <Button
+                size="xs"
+                variant="outline"
+                className="mt-3.5 w-full"
+                onClick={() =>
+                  api
+                    .get<Card>(`/cards/${selectedCard.id}`)
+                    .then(setCardDetail)
+                    .catch(() => toast.error('卡片读取失败'))
+                }
+              >
+                查看完整内容
+              </Button>
 
-                  {/* 卡片不挤进画布当节点，改在这里下钻 —— 画布只管结构，侧栏只管细节 */}
-                  {!!conceptCards.length && (
-                    <div className="mt-3.5">
-                      <div className="text-[11px] text-[var(--text-subtle)] mb-1.5">
-                        我在这块提过的问题
-                      </div>
-                      <div className="space-y-1">
-                        {conceptCards.map((a) => (
-                          <button
-                            key={a.card_id}
-                            onClick={() =>
-                              api
-                                .get<Card>(`/cards/${a.card_id}`)
-                                .then(setCardDetail)
-                                .catch(() => toast.error('卡片读取失败'))
-                            }
-                            className={cn(
-                              'w-full flex items-start gap-2 px-2 py-1.5 text-left text-[12.5px] rounded-[var(--radius-sm)]',
-                              'text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)] transition-colors',
-                            )}
-                          >
-                            <span
-                              className={cn(
-                                'mt-[5px] size-1.5 rounded-full shrink-0',
-                                a.is_rewritten
-                                  ? 'bg-[var(--sem-rewritten)]'
-                                  : 'bg-[var(--text-subtle)]',
-                              )}
-                              title={a.is_rewritten ? '已写己见' : 'AI 原生'}
-                            />
-                            <span className="min-w-0 line-clamp-2 leading-snug">
-                              {a.label || '未命名'}
-                            </span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {selectedConcept.card_count === 0 && (
-                    <div className="mt-4 p-3 border border-dashed border-[var(--border-strong)] rounded-[var(--radius)]">
-                      <p className="text-[12px] text-[var(--text-muted)] leading-relaxed">
-                        你在这块周边一个问题都没提过。可能是真的懂，也可能是盲区。
-                      </p>
-                      <Button
-                        size="xs"
-                        variant="primary"
-                        className="mt-2.5 w-full"
-                        loading={reinforcing === selectedConcept.label}
-                        onClick={() => reinforce(selectedConcept.label)}
-                      >
-                        生成强化课
-                      </Button>
-                    </div>
-                  )}
-                </>
-              )}
-
-              {selectedConcept.section_id && (
+              {selectedCard.section_id && (
                 <Button
                   size="xs"
-                  variant="outline"
-                  className="mt-3 w-full"
-                  onClick={() =>
-                    nav(`/courses/${selectedConcept.course_id}/sections/${selectedConcept.section_id}`)
-                  }
+                  variant="ghost"
+                  className="mt-1.5 w-full"
+                  onClick={() => nav(`/courses/${courseId}/sections/${selectedCard.section_id}`)}
                 >
-                  去读这一节
+                  回到这一节
                 </Button>
               )}
             </div>
-          ) : view === 'overlay' && overlay?.blank_spots.length ? (
-            <div className="p-4">
-              <div className="text-[13px] font-semibold">空白区</div>
-              <p className="text-[12px] text-[var(--text-muted)] mt-1.5 leading-relaxed">
-                这些概念你一个问题都没提过。点开可以生成专项强化课。
-              </p>
-              <div className="mt-3 space-y-1">
-                {overlay.blank_spots.slice(0, 24).map((b) => (
-                  <button
-                    key={b.id}
-                    onClick={() => {
-                      setSelected({ type: 'concept', id: b.id })
-                      const cy = cyRef.current
-                      const n = cy?.getElementById(b.id)
-                      if (n?.length) {
-                        touchedRef.current = true
-                        cy!.elements().addClass('dimmed')
-                        n.closedNeighborhood().removeClass('dimmed')
-                        cy!.animate({ center: { eles: n }, zoom: 1.2 }, { duration: 300 })
-                      }
-                    }}
-                    className="w-full px-2 py-1.5 text-left text-[12.5px] rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)] hover:text-[var(--text)] transition-colors truncate"
-                  >
-                    {b.label}
-                  </button>
-                ))}
-              </div>
-            </div>
           ) : (
             <div className="p-4">
-              <Empty
-                title="点一个球"
-                hint={
-                  view === 'cards'
-                    ? '双击卡片可以看到完整内容。'
-                    : view === 'overlay'
-                      ? '点概念看你在这块提过哪些问题。'
-                      : '这张图只讲领域客观长什么样，不掺你的学习状态。'
-                }
-              />
+              <Empty title="点一张卡" hint="双击可以看到完整内容。" />
             </div>
           )}
 
-          {view === 'cards' && (
-            <div className="px-4 pb-4">
-              <div className="text-[11px] text-[var(--text-subtle)] mb-2">关系类型</div>
-              <div className="space-y-1">
-                {Object.entries(RELATION_LABELS).map(([k, label]) => (
-                  <div
-                    key={k}
-                    className="flex items-center gap-2 text-[11.5px] text-[var(--text-muted)]"
-                  >
-                    <span
-                      className="w-4 h-[2px] rounded-full shrink-0"
-                      style={{ background: RELATION_COLORS[k as keyof typeof RELATION_COLORS] }}
-                    />
-                    {label}
-                  </div>
-                ))}
-              </div>
+          <div className="px-4 pb-4">
+            <div className="text-[11px] text-[var(--text-subtle)] mb-2">关系类型</div>
+            <div className="space-y-1">
+              {Object.entries(RELATION_LABELS).map(([k, label]) => (
+                <div
+                  key={k}
+                  className="flex items-center gap-2 text-[11.5px] text-[var(--text-muted)]"
+                >
+                  <span
+                    className="w-4 h-[2px] rounded-full shrink-0"
+                    style={{ background: RELATION_COLORS[k as keyof typeof RELATION_COLORS] }}
+                  />
+                  {label}
+                </div>
+              ))}
             </div>
-          )}
+          </div>
         </aside>
       </div>
 

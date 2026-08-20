@@ -42,6 +42,9 @@ class SectionOut(BaseModel):
     summary: str
     content_status: str
     key_concepts: list[Any] = []
+    # 学习路径图的边：本节的前置小节 id。前端据此画出依赖，
+    # 空数组表示这节没有前置，可以直接开始学
+    prerequisite_ids: list[str] = []
     completed: bool = False
     card_count: int = 0
 
@@ -114,6 +117,7 @@ async def _course_full(scope: Scope, c: Course) -> CourseOut:
                     summary=s.summary,
                     content_status=s.content_status,
                     key_concepts=list(s.key_concepts or []),
+                    prerequisite_ids=[str(x) for x in (s.prerequisite_ids or [])],
                     completed=s.completed_at is not None,
                     card_count=int(counts.get(s.id, 0)),
                 )
@@ -268,6 +272,7 @@ async def get_section(course_id: str, section_id: str, scope: Scope) -> dict:
         "content_md": section.content_md,
         "content_status": section.content_status,
         "key_concepts": list(section.key_concepts or []),
+        "prerequisite_ids": [str(x) for x in (section.prerequisite_ids or [])],
         "regenerate_count": section.regenerate_count,
         "completed": section.completed_at is not None,
         "chapter": {"id": chapter.id, "title": chapter.title, "idx": chapter.idx},

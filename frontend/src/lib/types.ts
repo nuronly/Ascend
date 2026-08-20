@@ -21,6 +21,8 @@ export interface SectionBrief {
   summary: string
   content_status: 'pending' | 'generating' | 'ready' | 'failed'
   key_concepts: string[]
+  /** 学习路径图的边：本节的前置小节 id。空数组 = 可以直接开始学 */
+  prerequisite_ids: string[]
   completed: boolean
   card_count: number
 }
@@ -53,6 +55,7 @@ export interface SectionDetail {
   content_md: string | null
   content_status: SectionBrief['content_status']
   key_concepts: string[]
+  prerequisite_ids: string[]
   regenerate_count: number
   completed: boolean
   chapter: { id: string; title: string; idx: number }
@@ -139,31 +142,6 @@ export interface Pomodoro {
   elapsed_seconds: number
   reviewed: boolean
   card_count?: number
-}
-
-export interface ConceptNode {
-  id: string
-  label: string
-  description: string
-  section_id: string | null
-  course_id: string | null
-  card_count: number
-  rewritten_count: number
-}
-
-export interface ConceptEdge {
-  id: string
-  from: string
-  to: string
-  relation: 'prerequisite' | 'part_of' | 'related' | 'contrast'
-}
-
-export interface OverlayData {
-  nodes: ConceptNode[]
-  edges: ConceptEdge[]
-  attachments: Record<string, { card_id: string; is_rewritten: boolean; label: string }[]>
-  blank_spots: { id: string; label: string }[]
-  coverage: number
 }
 
 export interface CardGraphNode {

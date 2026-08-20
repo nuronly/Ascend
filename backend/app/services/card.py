@@ -11,7 +11,7 @@ import logging
 from collections.abc import AsyncIterator
 from datetime import timedelta
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import func, or_, select
 
 from app.core.config import TIER_SMALL, TIER_STANDARD
 from app.core.scope import UserScope
@@ -27,7 +27,6 @@ from app.models.card import (
     CardLink,
     CardMessage,
 )
-from app.models.graph import CardConcept, Concept
 from app.models.learning import POMO_RUNNING, Pomodoro
 from app.models.system import CardSearch
 from app.search.fts import delete_card_fts, upsert_card_fts
@@ -286,10 +285,12 @@ async def stream_answer(
 # draft → vault：写入期做重活（PLAN §3.6 第 1 步）
 # ─────────────────────────────────────────────────────────────
 async def enrich_card(scope: UserScope, card: Card, *, quota: int | None = None) -> None:
-    """抽概念标签 + 一句话摘要，并挂到概念图上。
+    """抽概念标签 + 一句话摘要。
 
     成本摊薄到每次交互，用户无感。这是整个检索方案的关键 ——
     **把检索难度前移到写入期**，查询时就不必只靠向量硬捞。
+
+    标签写在 card.concept_tags 上，供检索索引、仓库页与勋章统计使用。
     """
     if not card.ai_answer and not card.user_note:
         return
@@ -316,30 +317,10 @@ async def enrich_card(scope: UserScope, card: Card, *, quota: int | None = None)
         return
 
     card.summary = str(data.get("summary") or "")[:400]
-    tags = [str(t).strip() for t in (data.get("concepts") or []) if str(t).strip()][:6]
-    card.concept_tags = tags
+    card.concept_tags = [
+        str(t).strip() for t in (data.get("concepts") or []) if str(t).strip()
+    ][:6]
     card.enriched_at = utcnow()
-    await scope.commit()
-
-    if tags:
-        await _link_concepts(scope, card, tags)
-
-
-async def _link_concepts(scope: UserScope, card: Card, tags: list[str]) -> None:
-    """把卡片挂到 AI 概念图的节点上 —— 这是叠加视图的连接桥（PLAN §3.4）。"""
-    norms = [t.lower() for t in tags]
-    concepts = await scope.all(
-        scope.select(Concept).where(Concept.norm_name.in_(norms))
-    )
-    await scope.session.execute(delete(CardConcept).where(CardConcept.card_id == card.id))
-    seen: set[str] = set()
-    for c in concepts:
-        if c.id in seen:
-            continue
-        seen.add(c.id)
-        scope.add(
-            CardConcept(card_id=card.id, concept_id=c.id, user_id=scope.user_id, weight=1.0)
-        )
     await scope.commit()
 
 
