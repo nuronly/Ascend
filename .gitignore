@@ -20,6 +20,9 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 
+# ── 部署状态：记录本机走的是哪条部署路线，随机器而异，不入仓 ──
+.deploy-mode
+
 # ── 数据与日志 ──
 backend/data/
 backend/logs/

@@ -28,17 +28,23 @@ _AUTH_PATHS = ("/api/auth/login", "/api/auth/register", "/api/auth/refresh", "/a
 
 
 def _client_ip(request: Request) -> str:
-    """取真实来源 IP。
+    """取限流用的来源 IP。
 
-    ⚠️ 只信任反代注入的第一跳。如果直接暴露在公网（没有反代），
-    X-Forwarded-For 是可以伪造的，那种部署方式本来也不该用。
+    X-Forwarded-For 是纯客户端可控的 header —— 只有确实存在反代、且反代
+    会覆写它时才可信。后端直接对外（单体部署）时必须无视它：否则每个请求
+    换一个伪造 IP 就落进一个全新的桶，撞库和刷额度的防护形同虚设。
+
+    所以这件事由 TRUST_PROXY_HEADERS 明确声明，绝不靠猜 —— 猜错的两个
+    方向都是坏的：该信不信，则全站请求挤在反代那一个 IP 上互相挤爆限额；
+    不该信却信，则限流等于没开。
     """
-    xff = request.headers.get("x-forwarded-for")
-    if xff:
-        return xff.split(",")[0].strip()
-    real = request.headers.get("x-real-ip")
-    if real:
-        return real.strip()
+    if settings.trust_proxy_headers:
+        xff = request.headers.get("x-forwarded-for")
+        if xff:
+            return xff.split(",")[0].strip()
+        real = request.headers.get("x-real-ip")
+        if real:
+            return real.strip()
     return request.client.host if request.client else "unknown"
 
 

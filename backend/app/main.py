@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import asynccontextmanager
 
@@ -130,6 +131,108 @@ async def csrf_origin_guard(request: Request, call_next):
                 {"detail": "请求来源不被信任"}, status_code=status.HTTP_403_FORBIDDEN
             )
     return await call_next(request)
+
+
+# ── 请求体硬上限 ──
+_WRITE_METHODS = {"POST", "PUT", "PATCH"}
+
+
+class _BodyTooLarge(Exception):
+    """请求体超过硬上限。只在中间件内部流转，不会漏到路由层。"""
+
+
+class BodySizeLimitMiddleware:
+    """按字节数掐掉过大的请求体。
+
+    为什么必须有：上传接口拿到的 UploadFile，在 multipart 解析阶段就已经把
+    数据接收并落到临时文件了 —— 等执行到路由函数里的大小判断，磁盘已经被写满
+    （磁盘满 → SQLite 写不进 → 全站挂）。反代部署时这道闸由 Nginx 的
+    client_max_body_size 提供，单体部署（uvicorn 直接对外）没有反代，
+    就只能在这里挡。
+
+    为什么是纯 ASGI 而不是 @app.middleware("http")：BaseHTTPMiddleware 会自己
+    包一层 receive 再交给下游，在它的 dispatch 里改 request._receive 是无效的
+    —— 必须拿到原始 receive 才能边收边数。
+    """
+
+    def __init__(self, app, max_bytes: int) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or scope.get("method") not in _WRITE_METHODS:
+            return await self.app(scope, receive, send)
+
+        # 快路径：声明了 Content-Length 的（浏览器上传、curl 都会声明），
+        # 一个字节都不用收就能拒绝
+        declared = self._declared_length(scope)
+        if declared is not None and declared > self.max_bytes:
+            return await self._reject(send)
+
+        received = 0
+        started = False
+
+        async def counting_receive() -> dict:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                # 不声明 Content-Length 的分块传输只能边收边数
+                if received > self.max_bytes:
+                    raise _BodyTooLarge
+            return message
+
+        async def tracking_send(message: dict) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counting_receive, tracking_send)
+        except _BodyTooLarge:
+            log.warning("请求体超过 %s 字节上限，已拒绝：%s", self.max_bytes, scope.get("path"))
+            # 响应已经开头了就改不了状态码，只能让它自然结束
+            if not started:
+                await self._reject(send)
+
+    @staticmethod
+    def _declared_length(scope: dict) -> int | None:
+        for name, value in scope.get("headers", []):
+            if name == b"content-length":
+                try:
+                    return int(value)
+                except ValueError:
+                    return None
+        return None
+
+    async def _reject(self, send) -> None:
+        body = json.dumps(
+            {
+                "detail": f"请求体过大，上限 {self.max_bytes // (1024 * 1024)}MB",
+                "code": "payload_too_large",
+            },
+            ensure_ascii=False,
+        ).encode()
+        await send(
+            {
+                "type": "http.response.start",
+                # 写字面量：starlette 已把 HTTP_413_REQUEST_ENTITY_TOO_LARGE 标记为
+                # 弃用，而新名字 HTTP_413_CONTENT_TOO_LARGE 在旧版本里还不存在
+                "status": 413,
+                "headers": [
+                    (b"content-type", b"application/json; charset=utf-8"),
+                    (b"content-length", str(len(body)).encode()),
+                    # 请求体没读完就回响应，连接不能再复用
+                    (b"connection", b"close"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+
+# 最后 add = 最外层 = 最先执行。越早拒绝越好，别让大 body 白走一圈中间件
+app.add_middleware(BodySizeLimitMiddleware, max_bytes=settings.max_body_bytes)
 
 
 # ── 异常映射：把内部错误翻译成用户能看懂的话 ──

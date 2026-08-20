@@ -114,8 +114,25 @@ def check_config() -> None:
             "速率限制已开启",
             f"认证 {settings.rate_auth_per_minute}/min · AI {settings.rate_ai_per_minute}/min",
         )
+        # 限流按谁的 IP 算，直接决定它是真防护还是摆设 —— 一定要打出来核对
+        if settings.trust_proxy_headers:
+            ok(
+                "限流信任 X-Forwarded-For",
+                "前提是后端在 Nginx/Caddy 之后；若 uvicorn 直接对外，"
+                "伪造一个 header 就能绕过限流，须设 TRUST_PROXY_HEADERS=false",
+            )
+        else:
+            ok(
+                "限流按连接来源 IP 计算",
+                "已忽略 X-Forwarded-For —— 后端直接对外时的正确选择",
+            )
     else:
         fail("速率限制未开启", "RATE_LIMIT_ENABLED=true")
+
+    ok(
+        f"请求体上限 {settings.max_body_bytes // (1024 * 1024)}MB",
+        "单体部署没有 Nginx 的 client_max_body_size，这道闸由应用层提供",
+    )
 
     section("3. LLM")
     from app.llm.registry import available_providers

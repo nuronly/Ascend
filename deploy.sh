@@ -12,6 +12,10 @@
 # ═════════════════════════════════════════════════════════════
 set -euo pipefail
 cd "$(dirname "$0")"
+ROOT="$(pwd)"
+LADDER_ROOT="$ROOT"
+# shellcheck source=deploy-lib.sh
+. "$ROOT/deploy-lib.sh"
 
 B=$'\033[1m'; G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; D=$'\033[2m'; X=$'\033[0m'
 say()  { printf "%s\n" "$1"; }
@@ -40,6 +44,10 @@ ok "Compose 就绪"
 if ! docker info >/dev/null 2>&1; then
   die "Docker 守护进程未运行或当前用户无权限。试：sudo systemctl start docker，或把用户加入 docker 组"
 fi
+
+# 这台机器是不是已经被裸机路线部署过了 —— 那边的 Nginx 正占着 80，
+# 直接起 Caddy 只会撞端口，而报错信息完全指不到根因
+ladder_mode_assert docker
 
 MEM=$(free -m 2>/dev/null | awk '/^Mem:/{print $2}' || echo 0)
 if [ "$MEM" -gt 0 ] && [ "$MEM" -lt 1800 ]; then
@@ -116,13 +124,17 @@ ok "构建完成"
 # ── 5. 启动 ──────────────────────────────────────────────────
 step "5/6  启动服务"
 $DC up -d
+# 记下部署方式：另外两个脚本会据此拒绝覆盖，update.sh 也靠它选择更新路径
+ladder_mode_write docker
 say "${D}等待健康检查…${X}"
 
 HEALTHY=0
 for i in $(seq 1 40); do
   if curl -fsS -m 3 http://127.0.0.1/api/health >/dev/null 2>&1; then HEALTHY=1; break; fi
   # 容器内部先探一次，区分「应用没起来」还是「Caddy 没转发」
-  if docker compose exec -T app curl -fsS -m 3 http://127.0.0.1:8788/api/health >/dev/null 2>&1; then
+  # 用 $DC 而不是写死 docker compose：只有 v1（docker-compose）的机器上，
+  # 写死会静默失败，于是永远探测不到"应用其实是好的"这个事实
+  if $DC exec -T app curl -fsS -m 3 http://127.0.0.1:8788/api/health >/dev/null 2>&1; then
     HEALTHY=2
   fi
   sleep 3
@@ -141,10 +153,10 @@ fi
 
 # ── 6. 自检 ──────────────────────────────────────────────────
 step "6/6  自检"
-docker compose exec -T app python scripts/preflight.py 2>/dev/null || warn "自检脚本执行异常（不影响服务运行）"
+$DC exec -T app python scripts/preflight.py 2>/dev/null || warn "自检脚本执行异常（不影响服务运行）"
 
 # ── 完成 ─────────────────────────────────────────────────────
-IP=$(curl -fsS -m 5 https://api.ipify.org 2>/dev/null || echo "<服务器公网IP>")
+IP=$(ladder_public_ip || echo "<服务器公网IP>")
 printf "\n${B}部署完成${X}\n\n"
 if [ "$SITE_ADDRESS" = ":80" ]; then
   say "  访问地址   ${B}http://${IP}${X}"

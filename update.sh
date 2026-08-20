@@ -5,14 +5,23 @@
 #      cd /opt/ladder && sudo ./update.sh
 #
 #  做的事：
-#    1. 处理 git 的 dubious ownership（root 操作非 root 克隆的仓库会被拒）
-#    2. git pull（会先暂存服务器上的本地改动，避免冲突中断）
-#    3. 只有前端代码变了才重新构建；纯后端改动只重启服务，几秒钟完事
-#    4. 验证服务确实加载了新代码
+#    1. 认出这台机器用的是哪条部署路线（裸机 / 单体 / Docker）
+#    2. 处理 git 的 dubious ownership（root 操作非 root 克隆的仓库会被拒）
+#    3. git pull（会先暂存服务器上的本地改动，避免冲突中断）
+#    4. 只有前端代码变了才重新构建；纯后端改动只重启服务，几秒钟完事
+#    5. 按实际监听端口验证服务确实加载了新代码
+#
+#  ★ 第 1 步是后来补上的，而它恰恰是最要紧的：原来这个脚本无条件调用
+#    install.sh，对单体部署（deploy-contest.sh）来说是灾难 —— 一次例行
+#    更新就会装上 Nginx、把服务改成只监听 127.0.0.1:8788，而比赛平台只
+#    放行了 8000，站点当场失联，偏偏 systemctl 还显示一切正常。
 # ═════════════════════════════════════════════════════════════
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
+LADDER_ROOT="$ROOT"
+# shellcheck source=deploy-lib.sh
+. "$ROOT/deploy-lib.sh"
 
 B=$'\033[1m'; G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; D=$'\033[2m'; X=$'\033[0m'
 ok()   { printf "${G}✓${X} %s\n" "$1"; }
@@ -22,6 +31,22 @@ die()  { printf "${R}✗${X} %s\n" "$1"; exit 1; }
 run_timeout() {
   if command -v timeout >/dev/null 2>&1; then timeout "$@"; else shift; "$@"; fi
 }
+
+# ── 0. 认出部署方式 ──────────────────────────────────────────
+# 必须在 pull 之前就确定：连出错提示里该让用户执行哪个脚本，都取决于它。
+MODE=$(ladder_mode_detect)
+case "$MODE" in
+  contest) DEPLOY_SCRIPT=./deploy-contest.sh ;;
+  docker)  DEPLOY_SCRIPT=./deploy.sh ;;
+  bare)    DEPLOY_SCRIPT=./install.sh ;;
+  *)
+    MODE=bare
+    DEPLOY_SCRIPT=./install.sh
+    warn "认不出部署方式（没有 ladder.service，也没有运行中的容器）"
+    warn "按「裸机 + Nginx」处理。若这台机器其实是单体部署，请直接跑 ./deploy-contest.sh"
+    ;;
+esac
+ok "部署方式：$(ladder_mode_desc "$MODE")"
 
 # root 操作非 root 克隆的仓库时，git 会以 dubious ownership 拒绝 —
 # 报错混在一堆输出里极容易被忽略，结果"更新了"其实一行代码都没变。
@@ -82,7 +107,7 @@ done
 [ "$PULLED" = "1" ] || die "所有源都拉不下来。可在本机执行：
     rsync -avz --delete --exclude node_modules --exclude .venv --exclude dist \\
       --exclude '*.db*' --exclude .env --exclude .git ./ root@<服务器IP>:$ROOT/
-  然后在服务器上直接执行 ./install.sh"
+  然后在服务器上直接执行 $DEPLOY_SCRIPT"
 
 NEW=$(git rev-parse HEAD)
 restore_stash
@@ -94,39 +119,76 @@ else
   git --no-pager log --oneline "$OLD..$NEW" | sed 's/^/    /'
 fi
 
-# 前端没动就只重启后端 —— 前端构建要几分钟，后端重启只要几秒
-if [ "$OLD" != "$NEW" ] && git diff --name-only "$OLD" "$NEW" | grep -q '^frontend/'; then
-  printf "\n${B}前端有变化，完整重装…${X}\n"
-  exec ./install.sh
-else
-  printf "\n${B}重启后端…${X}\n"
-  # 清掉字节码缓存 —— 服务器时钟异常时旧 .pyc 可能比新 .py "更新"，
-  # Python 会继续加载旧代码，表现就是"代码改了行为没变"
-  find backend/app -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
-  systemctl restart ladder
-  sleep 4
-  systemctl is-active --quiet ladder || {
-    tail -20 backend/logs/server.log
-    die "重启失败，日志见上"
-  }
-  ok "服务已重启"
+# ── 决定这次要不要走完整部署 ──────────────────────────────────
+FULL=0
+if [ "$MODE" = "docker" ]; then
+  # 容器把代码烤在镜像里，任何改动都得重建，没有"只重启"这条路
+  FULL=1
+elif [ "$OLD" != "$NEW" ] && git diff --name-only "$OLD" "$NEW" | grep -q '^frontend/'; then
+  # 前端构建要几分钟，后端重启只要几秒 —— 所以只在前端真变了时才全量
+  FULL=1
 fi
 
-# 验证新代码真的生效了。
+if [ "$FULL" = "1" ]; then
+  printf "\n${B}走完整部署：%s${X}\n" "$DEPLOY_SCRIPT"
+  exec "$DEPLOY_SCRIPT"
+fi
+
+# ★ 走快路径也要把这条路线必须成立的配置对齐一遍。
+#   否则新增的强制项（例如 TRUST_PROXY_HEADERS —— 决定限流是真防护还是
+#   摆设）要等到下一次全量部署才生效，中间这段时间防护看着是开的、
+#   实际没生效，谁都不会发现。
+if [ -f backend/.env ] && ladder_apply_mode_env "$MODE" backend/.env "$ROOT"; then
+  ok "关键配置已对齐（$(ladder_mode_desc "$MODE")）"
+fi
+
+printf "\n${B}重启后端…${X}\n"
+# 清掉字节码缓存 —— 服务器时钟异常时旧 .pyc 可能比新 .py "更新"，
+# Python 会继续加载旧代码，表现就是"代码改了行为没变"
+find backend/app -name '__pycache__' -type d -exec rm -rf {} + 2>/dev/null || true
+systemctl restart ladder
+sleep 4
+systemctl is-active --quiet ladder || {
+  tail -20 backend/logs/server.log
+  die "重启失败，日志见上"
+}
+ok "服务已重启"
+
+# ── 验证 ─────────────────────────────────────────────────────
+# 探测地址必须跟着部署方式走。单体模式没有反代，打 80 端口必然失败 ——
+# 原来固定探测 http://127.0.0.1 就是这个毛病，永远只能拿到一个 000。
+PORT=$(ladder_service_port 2>/dev/null || true)
+if [ "$MODE" = "contest" ]; then
+  PORT="${PORT:-8000}"
+  BASE="http://127.0.0.1:${PORT}"
+  HOSTHDR="127.0.0.1:${PORT}"
+else
+  # 裸机模式走一遍 Nginx，顺带验证反代这一层
+  BASE="http://127.0.0.1"
+  HOSTHDR=$(grep -E '^SITE_ADDRESS=' backend/.env 2>/dev/null | cut -d= -f2 | tr -d ' ' || true)
+  if [ -z "$HOSTHDR" ] || [ "$HOSTHDR" = ":80" ]; then HOSTHDR="127.0.0.1"; fi
+fi
+
+printf "\n${B}验证（%s）…${X}\n" "$BASE"
+
+HEALTH=$(curl -fsS -m 10 "${BASE}/api/health" 2>/dev/null || echo '')
+case "$HEALTH" in
+  *'"status":"ok"'*) ok "健康检查通过  $HEALTH" ;;
+  *) warn "健康检查未通过 —— tail -30 backend/logs/server.log" ;;
+esac
+
 # 注意：探测时必须让 Host 与 Origin 一致（模拟浏览器的真实同源请求），
-# 否则 CSRF 中间件会正确地把它们拦下，造成"修复没生效"的误判。
-printf "\n${B}验证…${X}\n"
-HOST_IP=$(grep -oE '^SITE_ADDRESS=.*' backend/.env 2>/dev/null | cut -d= -f2 | tr -d ' ')
-[ -z "$HOST_IP" ] || [ "$HOST_IP" = ":80" ] && HOST_IP="127.0.0.1"
-CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 10 -X POST http://127.0.0.1/api/auth/login \
+# 否则 CSRF 中间件会正确地把它拦下，造成"修复没生效"的误判。
+CODE=$(curl -s -o /dev/null -w "%{http_code}" -m 10 -X POST "${BASE}/api/auth/login" \
   -H "Content-Type: application/json" \
-  -H "Host: ${HOST_IP}" \
-  -H "Origin: http://${HOST_IP}" \
+  -H "Host: ${HOSTHDR}" \
+  -H "Origin: http://${HOSTHDR}" \
   -d '{"email":"probe@example.com","password":"probe-password"}' || echo "000")
 case "$CODE" in
   401|200) ok "同源请求正常通过（$CODE）" ;;
+  429) warn "被限流挡下（429）—— 说明限流在工作，稍等一分钟再验证" ;;
   403) die "仍返回 403 —— 服务没加载到新代码，把 backend/logs/server.log 末尾发给开发者" ;;
-  *) warn "探测返回 $CODE，手动验证：curl http://127.0.0.1/api/health" ;;
+  *) warn "探测返回 $CODE，手动验证：curl ${BASE}/api/health" ;;
 esac
 
 printf "\n${G}更新完成${X}\n"

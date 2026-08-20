@@ -69,6 +69,23 @@ class Settings(BaseSettings):
     # AI 类端点：防刷额度
     rate_ai_per_minute: int = 20
 
+    # ── 是否信任反代注入的来源 IP 头 ──
+    # 决定限流按谁的 IP 计算，是「防护是否真的生效」的开关，不是调优项。
+    #   true  —— 后端在 Nginx / Caddy 之后。反代会覆写 X-Forwarded-For，
+    #            所以它可信，且必须用它（否则所有请求都来自反代那一个 IP）。
+    #   false —— 后端直接对外（单体部署，uvicorn 自己监听公网端口）。
+    #            这时 X-Forwarded-For 完全由客户端说了算，伪造一个就换一个
+    #            限流桶，撞库与刷额度的防护会全部失效 —— 必须无视它。
+    # 默认 true 是为了兼容既有的反代部署；单体部署的脚本会显式设成 false。
+    trust_proxy_headers: bool = True
+
+    # ── 请求体硬上限（字节）──
+    # 反代模式下这道闸由 Nginx 的 client_max_body_size 提供；单体部署没有
+    # 反代，就必须在应用层挡住 —— multipart 在解析阶段就把数据落到临时文件，
+    # 等进到路由函数里再判大小，磁盘已经被写满了（磁盘满 → SQLite 写不进
+    # → 服务挂）。略高于上传接口自身的 40MB 限制，让 413 的措辞更准确。
+    max_body_bytes: int = 48 * 1024 * 1024
+
     # ── 鉴权 ──
     jwt_secret: str = "dev-only-secret-please-change-me"
     jwt_algorithm: str = "HS256"

@@ -22,6 +22,10 @@ services:
       FRONTEND_DIST: /app/web
       COOKIE_SECURE: "true"
       RATE_LIMIT_ENABLED: "true"
+      # app 只在内网被 Caddy 反代（没有 ports 暴露），转发头由 Caddy 注入，
+      # 可信且必须用 —— 否则限流会把所有人算成 Caddy 那一个容器 IP，
+      # 一个人触发限流就把全站挡在门外
+      TRUST_PROXY_HEADERS: "true"
       DATABASE_URL: sqlite+aiosqlite:////app/data/ladder.db
     volumes:
       # 数据库与勋章图片必须持久化，否则重建容器就全没了

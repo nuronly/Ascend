@@ -1,14 +1,39 @@
-# 阿里云 ECS 部署指南
+# 部署指南
 
-两条路，**推荐第一条**（不需要 Docker）：
+三条路，**推荐第一条**（不需要 Docker）：
 
-| 方案 | 命令 | 适用 |
-|---|---|---|
-| **裸机**（推荐） | `./install.sh` | Docker 装不上、内存小、想少一层抽象 |
-| 容器 | `./deploy.sh` | 环境干净、习惯 Docker |
+| 方案 | 命令 | 架构 | 适用 |
+|---|---|---|---|
+| **裸机**（推荐） | `./install.sh` | Nginx(:80) → 后端(:8788) | Docker 装不上、内存小、想少一层抽象 |
+| 容器 | `./deploy.sh` | Caddy(:80/443) → 后端(:8788) | 环境干净、习惯 Docker |
+| 单体 | `./deploy-contest.sh` | 后端直接监听(:8000) | 平台只放行少数端口、不给用 80/443 |
 
-架构一样：**Nginx/Caddy(:80) → 后端(:8788)**，后端同时提供 API 和前端静态文件。
-一个域名、零 CORS、零跨域 cookie 问题。
+前两条架构一致：反代在前，后端同时提供 API 和前端静态文件。一个域名、零 CORS、
+零跨域 cookie 问题。第三条把反代也省了，一个进程搞定 —— 端口受限的比赛/评审环境用它。
+
+## ⚠️ 三条路线互斥，一台机器只能选一条
+
+它们抢同一个 systemd 单元名（`ladder.service`）和同一份 `backend/.env`。
+在同一台机器上先后跑两条，后者会覆盖前者，而症状极其迷惑：
+
+> `systemctl status ladder` 显示 active，Nginx 也正常，
+> 但监听端口已经换了 —— 外面怎么都连不上，日志里什么异常都没有。
+
+脚本已经内置互检：检测到路线冲突会直接拒绝执行，并告诉你该跑哪个。
+确实要换路线时才加 `FORCE_SWITCH=1`（会先把旧的停干净）：
+
+```bash
+FORCE_SWITCH=1 ./install.sh
+```
+
+当前路线记录在仓库根目录的 `.deploy-mode`（不入仓）。老机器上没有这个文件也不影响 ——
+脚本会从现场痕迹（systemd 单元、Nginx 配置、运行中的容器）反推。
+
+**更新一律用 `./update.sh`**，它会自己认出路线并走对应的更新路径，不要手动挑脚本：
+
+```bash
+cd /opt/ladder && sudo ./update.sh
+```
 
 ---
 
@@ -118,7 +143,7 @@ systemctl restart ladder           # 重启
 journalctl -u ladder -f            # 系统日志
 tail -f backend/logs/server.log    # 应用日志
 
-cd /opt/ladder && git pull && sudo ./install.sh   # 更新
+cd /opt/ladder && sudo ./update.sh  # 更新（自动识别部署路线）
 ```
 
 数据库在 `backend/data/ladder.db`，更新部署不会动它。
@@ -178,6 +203,45 @@ cd /opt && git clone https://github.com/nuronly/Ascend.git ladder && cd ladder
 ```
 
 配置文件是 `.env.prod`（不是 `backend/.env`）。其余同上。
+
+---
+
+# 方案三：单体部署（端口受限时）
+
+用在**平台只放行少数端口**的环境（比赛 ECS 常见：只给 22，或额外开一个 8000）。
+uvicorn 直接监听对外端口，同时托管 API 和前端静态文件，没有反代 ——
+顺带也绕开了 SSE 缓冲问题，那本来就是 Nginx 特有的坑。
+
+```bash
+cd /opt && git clone https://github.com/nuronly/Ascend.git ladder && cd ladder
+sudo ./deploy-contest.sh          # 换端口：sudo PORT=9000 ./deploy-contest.sh
+```
+
+首次运行会生成 `backend/.env` 并停下等你填 LLM key，填完再跑一次。
+重复执行 = 更新部署，**重启前会自动备份数据库**到 `backend/data/backups/`。
+
+## 这条路线上几个必须知道的差异
+
+**1. 限流按连接来源 IP 算，脚本会设 `TRUST_PROXY_HEADERS=false`。**
+
+没有反代时 `X-Forwarded-For` 完全由客户端伪造 —— 如果还信任它，换一个 header
+就换一个限流桶，撞库防护和 AI 额度防护会全部作废。前两条路线相反，必须设 `true`
+（反代会覆写这个头，不用它则所有人被算成同一个 IP，一个人触发限流全站被挡）。
+
+**2. 请求体上限由应用层提供（默认 48MB）。**
+
+没有 Nginx 的 `client_max_body_size` 兜着，这道闸只能在应用里。想调整：
+在 `backend/.env` 里设 `MAX_BODY_BYTES`。
+
+**3. 纯 HTTP，`COOKIE_SECURE=false`。**
+
+登录凭证明文过网络。演示/评审可以接受，长期对外务必换成有域名 + HTTPS 的方案一。
+
+**4. 端口。**
+
+脚本会放行本机防火墙，但**云平台安全组要自己开** —— 这是"本机 curl 正常、
+外面打不开"的第一号原因。不指定 `PORT` 时会沿用当前 systemd 单元里已经在跑的端口，
+不会因为一次例行更新把在线站点换到别的端口上。
 
 ---
 

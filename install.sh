@@ -15,11 +15,18 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 ROOT="$(pwd)"
+LADDER_ROOT="$ROOT"
+# shellcheck source=deploy-lib.sh
+. "$ROOT/deploy-lib.sh"
 
 B=$'\033[1m'; G=$'\033[32m'; R=$'\033[31m'; Y=$'\033[33m'; D=$'\033[2m'; X=$'\033[0m'
-ok()   { printf "${G}✓${X} %s\n" "$1"; }
-warn() { printf "${Y}!${X} %s\n" "$1"; }
-die()  { printf "${R}✗${X} %s\n" "$1"; exit 1; }
+# 第二个参数是补充说明（暗色显示）。原来只取 $1，有三处调用传了两个参数，
+# 第二个被静默丢弃 —— 丢掉的恰恰是健康检查响应体、探测到的域名这类
+# 排障时最想看的东西。
+# 颜色序列包在 ${2:+} 里面：没有第二个参数时一个转义字符都不输出。
+ok()   { printf "${G}✓${X} %s\n" "$1${2:+  ${D}$2${X}}"; }
+warn() { printf "${Y}!${X} %s\n" "$1${2:+  ${D}$2${X}}"; }
+die()  { printf "${R}✗${X} %s\n" "$1${2:+  ${D}$2${X}}"; exit 1; }
 step() { printf "\n${B}%s${X}\n" "$1"; }
 info() { printf "  ${D}%s${X}\n" "$1"; }
 
@@ -27,6 +34,10 @@ SKIP_BUILD=0
 [[ "${1:-}" == "--skip-build" ]] && SKIP_BUILD=1
 
 [ "$(id -u)" = "0" ] || die "请用 root 运行：sudo ./install.sh"
+
+# 这台机器是不是已经被另一条路线部署过了 —— 三者抢同一个 systemd 单元，
+# 默默覆盖会让站点失联（服务显示 active，监听端口却变了）
+ladder_mode_assert bare
 
 # ── 1. 识别系统 ──────────────────────────────────────────────
 step "1/8  识别系统"
@@ -187,11 +198,11 @@ ok "密钥已配置"
 SITE="${SITE_ADDRESS:-:80}"
 mkdir -p "$ROOT/backend/data" "$ROOT/backend/logs"
 
-# 确保关键项正确
-sed -i "s|^SERVE_FRONTEND=.*|SERVE_FRONTEND=true|" "$ENVF"
-grep -q '^FRONTEND_DIST=' "$ENVF" || echo "FRONTEND_DIST=${ROOT}/frontend/dist" >> "$ENVF"
-sed -i "s|^APP_ENV=.*|APP_ENV=prod|" "$ENVF"
-grep -q '^RATE_LIMIT_ENABLED=' "$ENVF" || echo "RATE_LIMIT_ENABLED=true" >> "$ENVF"
+# 确保关键项正确。含 TRUST_PROXY_HEADERS=true —— 这条路线后端在 Nginx 之后，
+# X-Forwarded-For 由反代覆写（见下面的 proxy_set_header），所以可信、而且必须
+# 用它：否则限流会把所有人算成反代本机那一个 IP，一个人触发限流就把全站挡在门外。
+# （实现在 deploy-lib.sh，update.sh 的快路径调的是同一个函数）
+ladder_apply_mode_env bare "$ENVF" "$ROOT"
 
 # 站点到底跑没跑 HTTPS，不能只看 SITE_ADDRESS。
 # 用户可能手工给 Nginx 配好了证书（甚至加了 HTTP→HTTPS 跳转），
@@ -258,6 +269,8 @@ EOF
 systemctl daemon-reload
 systemctl enable ladder >/dev/null 2>&1
 systemctl restart ladder
+# 记下部署方式：另外两个脚本会据此拒绝覆盖，update.sh 也靠它选择更新路径
+ladder_mode_write bare
 sleep 5
 
 if systemctl is-active --quiet ladder; then
@@ -407,22 +420,9 @@ esac
 "$ROOT/backend/.venv/bin/python" "$ROOT/backend/scripts/preflight.py" 2>/dev/null || true
 
 # ── 完成 ─────────────────────────────────────────────────────
-detect_public_ip() {
-  local url ip
-  for url in https://api.ipify.org https://ifconfig.me https://ip.sb https://myip.ipip.net; do
-    ip=$(curl -fsS -m 4 "$url" 2>/dev/null | tr -d '[:space:]' || true)
-    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-      case "$ip" in
-        # 探测到内网段不算数，继续试下一个源
-        10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[0-2][0-9].*) continue ;;
-        *) echo "$ip"; return 0 ;;
-      esac
-    fi
-  done
-  return 1
-}
-
-IP=$(detect_public_ip || true)
+# 公网 IP 探测放在 deploy-lib.sh：三个脚本都要用，这种"绝不能打印内网段"
+# 的判断只能有一份实现
+IP=$(ladder_public_ip || true)
 printf "\n${B}部署完成${X}\n\n"
 if [ "$SITE" = ":80" ]; then
   if [ -n "${IP:-}" ]; then
