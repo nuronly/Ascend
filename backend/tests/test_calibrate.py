@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from pathlib import Path
 
@@ -31,8 +32,22 @@ def _user(known: list[str] | None = None) -> User:
     return User(id="u1", email="a@b.c", name="t", known_concepts=list(known or []))
 
 
+# 在被替换之前先抓住真身的签名
+_REAL_SIG = inspect.signature(calibrate.chat_json)
+
+
 def _fake_chat_json(payload: dict | Exception):
-    async def fn(*_a, **_kw):
+    """替身，但**先按真实签名校验参数**。
+
+    ★ 这一行 bind 是血的教训：替身原来无脑 `**_kw` 全收，于是
+      `chat_json(..., json_mode=True)` 这种参数名错误在测试里完全看不出来
+      （chat_json 内部本就强制 JSON，不接受这个参数），一路溜到线上，
+      表现成「一直显示没能生成概念地图」。
+      替身放过的东西，真身会当场拒绝 —— 所以替身必须比真身更严，至少一样严。
+    """
+
+    async def fn(*a, **kw):
+        _REAL_SIG.bind(*a, **kw)
         if isinstance(payload, Exception):
             raise payload
         return payload
@@ -229,7 +244,8 @@ class Test自评校验:
     def test_空回答不调模型(self):
         called = {"n": 0}
 
-        async def spy(*_a, **_kw):
+        async def spy(*a, **kw):
+            _REAL_SIG.bind(*a, **kw)
             called["n"] += 1
             return {"results": []}
 

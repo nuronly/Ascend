@@ -85,8 +85,8 @@ async def concept_map(
         tier=TIER_STANDARD,
         user_id=user.id,
         temperature=0.3,  # 概念地图要稳定可缓存，不需要创造力
-        max_tokens=2600,
-        json_mode=True,
+        # 推理模型的思维链也吃这份额度，给够 —— 被思维链吃光会零产出
+        max_tokens=8000,
         use_cache=True,
         quota=quota,
     )
@@ -186,8 +186,8 @@ async def verify_claims(
             tier=TIER_STANDARD,
             user_id=user.id,
             temperature=0.1,
-            max_tokens=400,
-            json_mode=True,
+            # 判定本身只要几十字，但推理模型会先想一大段，额度不能按输出长度给
+            max_tokens=4000,
             quota=quota,
         )
     except Exception as exc:
