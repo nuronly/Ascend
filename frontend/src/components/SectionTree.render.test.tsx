@@ -17,7 +17,7 @@ import type { ChapterBrief } from '@/lib/types'
 // 正好拿它验证错误捕获路径
 HTMLCanvasElement.prototype.getContext = vi.fn().mockReturnValue(null) as never
 
-import SectionTree from './SectionTree'
+import SectionTree, { sectionGridPositions } from './SectionTree'
 
 /** 两章四节：1.1 → 1.2 有依赖，2.1 跨章依赖 1.1，2.2 无前置 */
 const CHAPTERS: ChapterBrief[] = [
@@ -114,5 +114,37 @@ describe('SectionTree', () => {
     expect(await findByText('未开始')).toBeTruthy()
     expect(await findByText('读过')).toBeTruthy()
     expect(await findByText('学完')).toBeTruthy()
+  })
+})
+
+/**
+ * 网格坐标。
+ *
+ * 这张图刻意不跑自动布局 —— dagre 在 44% 屏宽的容器里会把 20 多个带标题的
+ * 方块挤成一团（真实数据上试过，没法看）。改成一章一行的确定性网格之后，
+ * 「位置可预测」就是它唯一的卖点，所以必须钉死。
+ */
+describe('sectionGridPositions', () => {
+  it('一章一行：同章小节的 y 相同', () => {
+    const p = sectionGridPositions(CHAPTERS)
+    expect(p['s1'].y).toBe(p['s2'].y)
+    expect(p['s3'].y).toBe(p['s4'].y)
+  })
+
+  it('章按顺序往下排', () => {
+    const p = sectionGridPositions(CHAPTERS)
+    expect(p['s3'].y).toBeGreaterThan(p['s1'].y)
+  })
+
+  it('章内小节从左到右，且各章对齐成列', () => {
+    const p = sectionGridPositions(CHAPTERS)
+    expect(p['s2'].x).toBeGreaterThan(p['s1'].x)
+    // 每章的第一节都在同一列 —— 对齐是「整齐」的全部来源
+    expect(p['s3'].x).toBe(p['s1'].x)
+    expect(p['s4'].x).toBe(p['s2'].x)
+  })
+
+  it('没有小节时返回空对象', () => {
+    expect(sectionGridPositions([])).toEqual({})
   })
 })

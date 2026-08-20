@@ -1,14 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import cytoscape from 'cytoscape'
-import { runCardLayout, runSectionTreeLayout } from './graphLayout'
+import { runCardLayout } from './graphLayout'
 
 /**
  * 布局的语义正确性测试。
  *
- * 这里断言的不是"像素对不对"，而是"层级关系有没有把知识结构讲反"——
- * 把第 5 章的小节排在第 1 章旁边，用户就会以为它们可以同时开始学，
- * 那是实打实的误导。dagre 升级、选项改名这类变动都会静默破坏这些性质，
- * 所以必须钉住。
+ * 这里断言的不是"像素对不对"，而是"方向有没有被讲反"——
+ * 追问链要是排乱了，用户就看不出一个问题被挖了多深。dagre 升级、
+ * 选项改名这类变动都会静默破坏这些性质，所以必须钉住。
+ *
+ * 学习路径图的坐标测试在 components/SectionTree.render.test.tsx ——
+ * 它不跑自动布局，用的是确定性网格。
  */
 
 const layerOf = (cy: cytoscape.Core, axis: 'x' | 'y') => {
@@ -18,68 +20,6 @@ const layerOf = (cy: cytoscape.Core, axis: 'x' | 'y') => {
   })
   return pos
 }
-
-describe('学习路径图（TB：上→下 = 学习顺序）', () => {
-  /**
-   * 两章五节的真实形状：
-   *   第 1 章：1.1 → 1.2（依赖），1.3 无前置
-   *   第 2 章：2.1 同时依赖 1.1 和 1.2（多前置），2.2 无前置
-   * 2.2 没有任何依赖，只能靠脊线（1.3 → 2.2）把它压到第二章的位置。
-   */
-  const build = () =>
-    cytoscape({
-      headless: true,
-      elements: [
-        ...['1.1', '1.2', '1.3', '2.1', '2.2'].map((id) => ({ data: { id } })),
-        { data: { id: 'd1', source: '1.1', target: '1.2' }, classes: 'dep' },
-        { data: { id: 'd2', source: '1.1', target: '2.1' }, classes: 'dep' },
-        { data: { id: 'd3', source: '1.2', target: '2.1' }, classes: 'dep' },
-        // 脊线只连「没有前置」的小节：2.1 已被依赖定位，所以只给 2.2 连
-        { data: { id: 's1', source: '1.3', target: '2.2' }, classes: 'spine' },
-      ],
-    })
-
-  it('多前置的两个依赖都排在它上方（图没有被砍成树）', () => {
-    const cy = build()
-    runSectionTreeLayout(cy)
-    const y = layerOf(cy, 'y')
-    expect(y['1.1']).toBeLessThan(y['2.1'])
-    expect(y['1.2']).toBeLessThan(y['2.1'])
-  })
-
-  it('依赖链严格向下', () => {
-    const cy = build()
-    runSectionTreeLayout(cy)
-    const y = layerOf(cy, 'y')
-    expect(y['1.1']).toBeLessThan(y['1.2'])
-  })
-
-  it('同章内互不依赖的小节并排在同一层（不臆造先后）', () => {
-    const cy = build()
-    runSectionTreeLayout(cy)
-    const y = layerOf(cy, 'y')
-    // 1.1 和 1.3 都没有前置，应该并排 —— 表达「这两节谁先学都行」
-    expect(y['1.3']).toBe(y['1.1'])
-  })
-
-  it('★ 没有前置的小节靠脊线压在它所属的章里，不会被顶到第一层', () => {
-    const cy = build()
-    runSectionTreeLayout(cy)
-    const y = layerOf(cy, 'y')
-    // 这条是整张图可读性的命门：2.2 一条依赖都没有，
-    // 若不靠脊线约束就会和第 1 章的小节并排，课程的推进感全丢
-    expect(y['2.2']).toBeGreaterThan(y['1.3'])
-    expect(y['2.2']).toBeGreaterThan(y['1.1'])
-  })
-
-  it('并排的同层节点不重叠', () => {
-    const cy = build()
-    runSectionTreeLayout(cy)
-    const p = cy.getElementById('1.1').position()
-    const q = cy.getElementById('1.3').position()
-    expect(Math.abs(p.x - q.x)).toBeGreaterThan(20)
-  })
-})
 
 describe('问题图（LR：左→右 = 追问深度）', () => {
   const build = () =>
@@ -123,17 +63,8 @@ describe('退化输入', () => {
     expect(xs.size).toBeGreaterThan(1)
   })
 
-  it('路径图只有孤立小节（模型一条依赖都没给）时不崩', () => {
-    const cy = cytoscape({
-      headless: true,
-      elements: [1, 2, 3].map((i) => ({ data: { id: `s${i}` } })),
-    })
-    expect(() => runSectionTreeLayout(cy)).not.toThrow()
-  })
-
   it('空图不崩', () => {
     const cy = cytoscape({ headless: true, elements: [] })
     expect(() => runCardLayout(cy)).not.toThrow()
-    expect(() => runSectionTreeLayout(cy)).not.toThrow()
   })
 })
