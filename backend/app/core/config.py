@@ -114,6 +114,18 @@ class Settings(BaseSettings):
     # 场景级精确覆盖，优先级高于档位。格式：scene=provider:model,scene=provider:model
     model_overrides: str = ""
 
+    # ── 联网搜索（工具调用）──
+    # 学习辅助最需要外部信息的两处：大纲阶段核实知识体系与最新进展，
+    # 正文阶段给学习者附上权威参考资料。
+    search_enabled: bool = True
+    tavily_api_key: str = ""
+    # basic 一次 1 credit；advanced 2 credit 但抓得更深
+    search_depth: str = "basic"
+    search_max_results: int = 5
+    # ★ tool loop 的轮数上限。一轮 = 一次完整的模型往返 + 一次检索，
+    # 不设上限的话模型可能反复搜索直到把额度烧光
+    tool_max_rounds: int = 3
+
     # ── 成本 ──
     daily_token_quota: int = 2_000_000
     llm_timeout_seconds: float = 180.0

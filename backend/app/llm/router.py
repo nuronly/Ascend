@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import random
@@ -38,11 +37,15 @@ from app.llm.base import (
     LLMResult,
     Message,
     StreamChunk,
+    ToolCall,
+    ToolEvent,
     Usage,
 )
+from app.llm.cache import cache_get, cache_key, cache_put
 from app.llm.pricing import estimate_cost
 from app.llm.registry import resolve
-from app.models.system import AICall, LLMCache
+from app.llm.tools import Tool, tool_specs
+from app.models.system import AICall
 
 log = logging.getLogger(__name__)
 
@@ -57,19 +60,12 @@ _TIER_SPEC = {
 # ─────────────────────────────────────────────────────────────
 # 辅助
 # ─────────────────────────────────────────────────────────────
-def _cache_key(scene: str, model: str, messages: list[Message], extra: str = "") -> str:
-    h = hashlib.sha256()
-    h.update(scene.encode())
-    h.update(b"\x00")
-    h.update(model.encode())
-    h.update(b"\x00")
+def _conv_key(scene: str, model: str, messages: list[Message], extra: str = "") -> str:
+    parts = [scene, model]
     for m in messages:
-        h.update(m.role.encode())
-        h.update(b"\x01")
-        h.update(m.content.encode())
-        h.update(b"\x02")
-    h.update(extra.encode())
-    return h.hexdigest()
+        parts += [m.role, m.content]
+    parts.append(extra)
+    return cache_key(*parts)
 
 
 _JSON_FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.S)
@@ -222,6 +218,8 @@ async def _log_call(
     success: bool,
     error: str | None = None,
     fallback_hop: int = 0,
+    # 工具调用不按 token 计价（按次/按 credit），直接给定金额
+    cost_override: float | None = None,
 ) -> None:
     """日志失败绝不能影响主流程，所以整段吞异常。"""
     try:
@@ -236,7 +234,11 @@ async def _log_call(
                     tier=tier,
                     prompt_tokens=usage.prompt_tokens,
                     completion_tokens=usage.completion_tokens,
-                    cost_usd=estimate_cost(model, usage.prompt_tokens, usage.completion_tokens),
+                    cost_usd=(
+                        cost_override
+                        if cost_override is not None
+                        else estimate_cost(model, usage.prompt_tokens, usage.completion_tokens)
+                    ),
                     cache_hit=cache_hit,
                     latency_ms=latency_ms,
                     success=success,
@@ -251,39 +253,78 @@ async def _log_call(
 
 
 # ─────────────────────────────────────────────────────────────
-# 缓存
+# 工具执行
 # ─────────────────────────────────────────────────────────────
-async def _cache_get(key: str) -> str | None:
+async def _run_tool(
+    call: ToolCall, tools: list[Tool], *, user_id: str | None, scene: str
+) -> tuple[str, ToolEvent]:
+    """执行一次工具调用，返回（喂回模型的文本, 给前端的事件）。
+
+    工具失败**不抛异常**：把失败如实写回给模型，它会基于已有知识继续，
+    而不是让整场生成崩掉。对学习场景来说，「搜不到就别编」比「直接失败」
+    和「编个来源」都好。
+    """
+    impl = next((t for t in tools if t.name == call.name), None)
+    t0 = time.perf_counter()
+
+    if impl is None:
+        detail = f"未知工具 {call.name}"
+        log.warning("模型调用了不存在的工具：%s", call.name)
+        return (
+            f"工具 {call.name} 不存在，请不要再调用它。",
+            ToolEvent(phase="error", name=call.name, detail=detail),
+        )
+
+    args = call.args()
     try:
-        async with SessionLocal() as s:
-            row = await s.get(LLMCache, key)
-            if row is None:
-                return None
-            row.hits += 1
-            await s.commit()
-            return row.value
-    except Exception:
-        log.exception("读取 LLM 缓存失败（已忽略）")
-        return None
+        result = await impl.run(**args)
+    except Exception as exc:  # 工具自己没兜住的意外
+        log.exception("工具 %s 执行异常", call.name)
+        return (
+            f"工具 {call.name} 执行失败：{exc}。请基于已有知识继续，不要编造。",
+            ToolEvent(
+                phase="error",
+                name=call.name,
+                detail=str(exc)[:120],
+                ms=int((time.perf_counter() - t0) * 1000),
+            ),
+        )
+
+    ms = int((time.perf_counter() - t0) * 1000)
+    # 工具也花钱，记一条进 ai_calls，否则成本看板会缺一块
+    await _log_call(
+        user_id=user_id,
+        scene=f"{scene}:{call.name}",
+        provider="tool",
+        model=call.name,
+        tier="tool",
+        usage=Usage(),
+        cache_hit=False,
+        latency_ms=ms,
+        success=True,
+        cost_override=result.cost_usd,
+    )
+    return (
+        result.content,
+        ToolEvent(
+            phase="result",
+            name=call.name,
+            detail=result.summary,
+            payload=result.display,
+            ms=ms,
+        ),
+    )
 
 
-async def _cache_put(key: str, scene: str, model: str, value: str, meta: dict | None = None) -> None:
-    try:
-        async with SessionLocal() as s:
-            if await s.get(LLMCache, key) is None:
-                s.add(
-                    LLMCache(
-                        key=key,
-                        scene=scene,
-                        model=model,
-                        value=value,
-                        meta=meta or {},
-                        created_at=utcnow(),
-                    )
-                )
-                await s.commit()
-    except Exception:
-        log.exception("写入 LLM 缓存失败（已忽略）")
+def _call_detail(call: ToolCall) -> str:
+    """给用户看的一句话：正在搜什么。"""
+    a = call.args()
+    q = str(a.get("query") or "").strip()
+    kind = str(a.get("kind") or "")
+    label = {"paper": "论文", "video": "视频", "tutorial": "教程"}.get(kind, "")
+    if q:
+        return f"{q}（{label}）" if label else q
+    return call.name
 
 
 # ─────────────────────────────────────────────────────────────
@@ -330,10 +371,11 @@ async def chat(
     quota: int | None = None,
 ) -> LLMResult:
     chain = _chain(tier, model_override, scene)
-    cache_key = None
+    # 局部名刻意不叫 cache_key —— 那是导入进来的函数名
+    ckey = None
     if use_cache:
-        cache_key = _cache_key(scene, chain[0], messages, f"{temperature}|{json_mode}")
-        if cached := await _cache_get(cache_key):
+        ckey = _conv_key(scene, chain[0], messages, f"{temperature}|{json_mode}")
+        if cached := await cache_get(ckey):
             await _log_call(
                 user_id=user_id, scene=scene, provider="cache", model=chain[0], tier=tier,
                 usage=Usage(), cache_hit=True, latency_ms=0, success=True,
@@ -366,8 +408,8 @@ async def chat(
                     latency_ms=int((time.perf_counter() - t0) * 1000),
                     success=True, fallback_hop=hop,
                 )
-                if cache_key and result.text:
-                    await _cache_put(cache_key, scene, model, result.text)
+                if ckey and result.text:
+                    await cache_put(ckey, scene, model, result.text)
                 return result
             except LLMError as exc:
                 last_err = exc
@@ -429,22 +471,26 @@ async def chat_json(
     raise LLMError(f"结构化输出连续解析失败（{scene}）：{last_text[:300]}")
 
 
-async def stream_chat(
-    messages: list[Message],
+async def _stream_round(
+    convo: list[Message],
+    sink: dict[str, list[ToolCall]],
     *,
     scene: str,
-    tier: str = TIER_STANDARD,
-    user_id: str | None = None,
-    temperature: float = 0.7,
-    max_tokens: int | None = None,
-    quota: int | None = None,
+    tier: str,
+    user_id: str | None,
+    temperature: float,
+    max_tokens: int | None,
+    json_mode: bool,
+    specs: list[dict[str, Any]] | None,
 ) -> AsyncIterator[StreamChunk]:
-    """流式输出。等 30 秒白屏必流失（PLAN §3.1）。
+    """一轮流式调用（含降级链）。
+
+    模型这一轮决定调工具时，把 tool_calls 放进 sink 并**不**发 done ——
+    那意味着还没说完，交回 tool loop 继续。
 
     降级有个硬约束：**一旦已经吐出内容就不能再换模型**，
     否则用户会看到两段拼在一起的答案。所以只在零产出时降级。
     """
-    await check_budget(user_id, quota)
     chain = _chain(tier, None, scene)
     last_err: Exception | None = None
 
@@ -457,19 +503,32 @@ async def stream_chat(
 
         t0 = time.perf_counter()
         produced = False
+        calls: list[ToolCall] = []
         usage = Usage()
         actual_model = model
         try:
             async for chunk in provider.stream(
-                messages, model=model, temperature=temperature, max_tokens=max_tokens
+                convo,
+                model=model,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                tools=specs,
             ):
                 if chunk.done:
                     usage = chunk.usage or usage
                     actual_model = chunk.model or actual_model
                     break
+                if chunk.tool_calls:
+                    # ★ 发起工具调用时 content 恰好是空的。必须把它算作「有产出」，
+                    #   否则下面的零产出判断会误判失败、无谓地跳到备用模型 ——
+                    #   装上工具后的第一个症状就是这个。
+                    calls = chunk.tool_calls
+                    produced = True
+                    continue
                 # 思维链（reasoning）透传给业务层展示「正在思考」，
-                # 但不算正文产出 —— produced 只认 delta。这样「思维链跑完了、
-                # 正文被 max_tokens 截断为空」仍会触发下方的零产出降级。
+                # 但不算正文产出 —— produced 只认 delta / tool_calls。这样
+                # 「思维链跑完了、正文被 max_tokens 截断为空」仍会触发零产出降级。
                 if chunk.delta:
                     produced = True
                 if chunk.delta or chunk.reasoning:
@@ -511,10 +570,73 @@ async def stream_chat(
             latency_ms=int((time.perf_counter() - t0) * 1000),
             success=True, fallback_hop=hop,
         )
+        if calls:
+            sink["calls"] = calls
+            return  # 还没说完，交回 tool loop
         yield StreamChunk(done=True, usage=usage, model=actual_model, provider=provider.name)
         return
 
     raise LLMError(f"全部模型流式调用均失败（{scene}）：{last_err}")
+
+
+async def stream_chat(
+    messages: list[Message],
+    *,
+    scene: str,
+    tier: str = TIER_STANDARD,
+    user_id: str | None = None,
+    temperature: float = 0.7,
+    max_tokens: int | None = None,
+    quota: int | None = None,
+    json_mode: bool = False,
+    tools: list[Tool] | None = None,
+) -> AsyncIterator[StreamChunk]:
+    """流式输出。等 30 秒白屏必流失（PLAN §3.1）。
+
+    带 tools 时跑 tool loop：模型可以先检索再作答，中间每一步都以 ToolEvent
+    透出（正在搜什么 / 搜到了什么）。大纲本来就要一两分钟，中间再插一次
+    静默的联网检索，等待就彻底不可预期了 —— 所以过程必须可见。
+    """
+    await check_budget(user_id, quota)
+    specs = tool_specs(tools) if tools else None
+    convo = list(messages)
+    rounds = settings.tool_max_rounds if tools else 0
+
+    for round_no in range(rounds + 1):
+        # 最后一轮不再给工具：必须收敛到正文。留着工具的话，模型往往会
+        # 「再搜一次看看」，把额度耗在检索上却始终不产出大纲
+        last_round = round_no == rounds
+        sink: dict[str, list[ToolCall]] = {}
+
+        async for chunk in _stream_round(
+            convo,
+            sink,
+            scene=scene,
+            tier=tier,
+            user_id=user_id,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            json_mode=json_mode,
+            specs=None if last_round else specs,
+        ):
+            yield chunk
+
+        calls = sink.get("calls") or []
+        if not calls or not tools:
+            return  # 本轮就是最终输出，done 已经由 _stream_round 发出
+
+        # 预算每轮重查：一轮 loop 就是一次完整的模型往返，
+        # 只在入口查一次的话长 loop 会悄悄超支
+        await check_budget(user_id, quota)
+
+        convo.append(Message(role="assistant", content="", tool_calls=calls))
+        for c in calls:
+            yield StreamChunk(
+                tool_event=ToolEvent(phase="call", name=c.name, detail=_call_detail(c))
+            )
+            text, ev = await _run_tool(c, tools, user_id=user_id, scene=scene)
+            yield StreamChunk(tool_event=ev)
+            convo.append(Message(role="tool", content=text, tool_call_id=c.id))
 
 
 async def embed(
@@ -529,9 +651,9 @@ async def embed(
     misses: list[int] = []
     keys: list[str] = []
     for i, t in enumerate(texts):
-        k = hashlib.sha256(f"emb|{model}|{t}".encode()).hexdigest()
+        k = cache_key("emb", model, t)
         keys.append(k)
-        if cached := await _cache_get(k):
+        if cached := await cache_get(k):
             try:
                 results[i] = json.loads(cached)
                 continue
@@ -557,7 +679,7 @@ async def embed(
                 raise
             for i, vec in zip(batch_idx, vectors, strict=False):
                 results[i] = vec
-                await _cache_put(keys[i], scene, model, json.dumps(vec))
+                await cache_put(keys[i], scene, model, json.dumps(vec))
 
         approx_tokens = sum(len(texts[i]) for i in misses) // 2
         await _log_call(

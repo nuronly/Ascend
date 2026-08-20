@@ -8,11 +8,12 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import AsyncIterator
+from typing import Any
 
 import httpx
 
 from app.core.config import settings
-from app.llm.base import LLMError, LLMResult, Message, StreamChunk, Usage
+from app.llm.base import LLMError, LLMResult, Message, StreamChunk, ToolCall, Usage
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +71,7 @@ class OpenAICompatProvider:
         temperature: float,
         max_tokens: int | None,
         json_mode: bool,
+        tools: list[dict[str, Any]] | None = None,
     ) -> dict:
         body: dict = {
             "model": model,
@@ -80,7 +82,26 @@ class OpenAICompatProvider:
             body["max_tokens"] = max_tokens
         if json_mode:
             body["response_format"] = {"type": "json_object"}
+        if tools:
+            body["tools"] = tools
+            # auto 而不是 required：让模型自己判断要不要查。
+            # 强制它每次都调一遍工具，它就会为了交差硬编一个查询词。
+            body["tool_choice"] = "auto"
         return body
+
+    @staticmethod
+    def _parse_calls(raw: list[dict] | None) -> list[ToolCall]:
+        out: list[ToolCall] = []
+        for c in raw or []:
+            fn = c.get("function") or {}
+            out.append(
+                ToolCall(
+                    id=str(c.get("id") or ""),
+                    name=str(fn.get("name") or ""),
+                    arguments=str(fn.get("arguments") or ""),
+                )
+            )
+        return out
 
     # ── 非流式 ──
     async def complete(
@@ -91,9 +112,10 @@ class OpenAICompatProvider:
         temperature: float = 0.7,
         max_tokens: int | None = None,
         json_mode: bool = False,
+        tools: list[dict[str, Any]] | None = None,
         timeout: float | None = None,
     ) -> LLMResult:
-        body = self._payload(messages, model, temperature, max_tokens, json_mode)
+        body = self._payload(messages, model, temperature, max_tokens, json_mode, tools)
         try:
             resp = await self._get_client().post(
                 "/chat/completions", json=body, timeout=timeout or settings.llm_timeout_seconds
@@ -115,9 +137,11 @@ class OpenAICompatProvider:
 
         data = resp.json()
         choice = (data.get("choices") or [{}])[0]
+        msg = choice.get("message") or {}
         usage_raw = data.get("usage") or {}
         return LLMResult(
-            text=(choice.get("message") or {}).get("content") or "",
+            # 发起工具调用时 content 是空字符串，这是正常的，不是失败
+            text=msg.get("content") or "",
             usage=Usage(
                 prompt_tokens=usage_raw.get("prompt_tokens", 0),
                 completion_tokens=usage_raw.get("completion_tokens", 0),
@@ -125,6 +149,7 @@ class OpenAICompatProvider:
             model=data.get("model") or model,
             provider=self.name,
             finish_reason=choice.get("finish_reason") or "",
+            tool_calls=self._parse_calls(msg.get("tool_calls")),
             raw=data,
         )
 
@@ -136,9 +161,11 @@ class OpenAICompatProvider:
         model: str,
         temperature: float = 0.7,
         max_tokens: int | None = None,
+        json_mode: bool = False,
+        tools: list[dict[str, Any]] | None = None,
         timeout: float | None = None,
     ) -> AsyncIterator[StreamChunk]:
-        body = self._payload(messages, model, temperature, max_tokens, False)
+        body = self._payload(messages, model, temperature, max_tokens, json_mode, tools)
         body["stream"] = True
         # 有些兼容网关默认不回 usage，显式索要
         body["stream_options"] = {"include_usage": True}
@@ -146,6 +173,10 @@ class OpenAICompatProvider:
         usage = Usage()
         actual_model = model
         client = self._get_client()
+        # 流式协议里 tool_calls 是逐字符分片的：首片带 id 与函数名，
+        # 后续片只带 index 和 arguments 的一小段，要按 index 自己拼回去。
+        # 而且模型可以并行发起多个调用（实测同一次响应里出现过 index 0 和 1）。
+        tool_acc: dict[int, dict[str, str]] = {}
 
         # 流式场景用「首 token 超时」而非总超时（PLAN §4.1）：
         # 长文生成的总时长本来就长，用总超时会误杀正常请求。
@@ -190,6 +221,18 @@ class OpenAICompatProvider:
                             yield StreamChunk(
                                 reasoning=reasoning, model=actual_model, provider=self.name
                             )
+                        for tc in d.get("tool_calls") or []:
+                            slot = tool_acc.setdefault(
+                                int(tc.get("index") or 0),
+                                {"id": "", "name": "", "arguments": ""},
+                            )
+                            if tc.get("id"):
+                                slot["id"] = str(tc["id"])
+                            fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                slot["name"] = str(fn["name"])
+                            if fn.get("arguments"):
+                                slot["arguments"] += str(fn["arguments"])
                         if delta := d.get("content"):
                             if not first_token_seen:
                                 first_token_seen = True
@@ -204,6 +247,18 @@ class OpenAICompatProvider:
                 if finish_reason == "length":
                     log.warning(
                         "[%s/%s] 输出被 max_tokens 截断（finish_reason=length）", self.name, model
+                    )
+
+                # 工具调用拼装完成后整条给出。放在 done 之前，
+                # 让 router 的 tool loop 先拿到它再决定要不要继续
+                if tool_acc:
+                    yield StreamChunk(
+                        tool_calls=[
+                            ToolCall(id=s["id"], name=s["name"], arguments=s["arguments"])
+                            for _, s in sorted(tool_acc.items())
+                        ],
+                        model=actual_model,
+                        provider=self.name,
                     )
         except httpx.TimeoutException as exc:
             raise LLMError(
