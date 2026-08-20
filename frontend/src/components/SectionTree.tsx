@@ -114,14 +114,17 @@ export default function SectionTree({ chapters, activeId, onSelect, className }:
             // 只有当边的两端都在高亮链上时才算「这一条」被点亮，
             // 否则悬停一个节点会把它前置的所有旁支也一起点亮，反而更花
             const lit = litIds.has(e.from) && litIds.has(e.to)
+            // 跨多层的长边是绕行的，默认更细更淡，让相邻层的主干先被看见；
+            // 悬停点亮时一视同仁，那会儿它才是要看的信息
+            const far = e.span > 1
             return (
               <path
                 key={e.id}
                 d={e.d}
                 fill="none"
                 stroke={lit ? 'var(--accent)' : 'var(--border-strong)'}
-                strokeWidth={lit ? 1.8 : 1.1}
-                opacity={hover ? (lit ? 1 : 0.25) : 0.75}
+                strokeWidth={lit ? 1.8 : far ? 0.9 : 1.1}
+                opacity={hover ? (lit ? 1 : 0.18) : far ? 0.5 : 0.78}
                 className="transition-all duration-150"
               />
             )

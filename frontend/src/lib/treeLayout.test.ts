@@ -43,6 +43,13 @@ const CH: ChapterBrief[] = [
 const layerOf = (l: ReturnType<typeof computeTreeLayout>) =>
   Object.fromEntries(l.nodes.map((n) => [n.id, n.layer]))
 
+/** 跨章长边：a1 在第 0 层，c1 在第 2 层，中间隔着一层 */
+const LONG: ChapterBrief[] = [
+  chap('c1', 0, [sec('a1', 0)]),
+  chap('c2', 1, [sec('b1', 0), sec('b2', 1)]),
+  chap('c3', 2, [sec('c1s', 0, ['a1'])]),
+]
+
 describe('computeTreeLayout · 分层', () => {
   it('有前置的小节排在它所有前置的下一层', () => {
     const y = layerOf(computeTreeLayout(CH))
@@ -139,6 +146,38 @@ describe('computeTreeLayout · 连线', () => {
     const to = l.nodes.find((n) => n.id === 's2')!
     expect(e.d.startsWith(`M${from.x + NODE_W / 2},${from.y + NODE_H}`)).toBe(true)
     expect(e.d.endsWith(`${to.x + NODE_W / 2},${to.y}`)).toBe(true)
+  })
+
+  it('★ 跨多层的长边被拆成逐层的段，不再一条曲线压过中间层', () => {
+    const l = computeTreeLayout(LONG)
+    const e = l.edges.find((x) => x.from === 'a1' && x.to === 'c1s')!
+    // 跨 2 层 → 2 段。段数 = 跨层数，说明中间那层插了通道点
+    expect(e.span).toBe(2)
+    expect(e.d.match(/C/g)).toHaveLength(2)
+  })
+
+  it('相邻层的边只有一段', () => {
+    const l = computeTreeLayout(CH)
+    const e = l.edges.find((x) => x.from === 's1' && x.to === 's2')!
+    expect(e.span).toBe(1)
+    expect(e.d.match(/C/g)).toHaveLength(1)
+  })
+
+  it('长边的通道把中间层撑宽，从而给线让出位置', () => {
+    // 同样两个小节的中间层，有长边穿过时必须更宽 —— 这就是「让路」的证据
+    const withLong = computeTreeLayout(LONG)
+    const noLong: ChapterBrief[] = [
+      chap('c1', 0, [sec('a1', 0)]),
+      chap('c2', 1, [sec('b1', 0), sec('b2', 1)]),
+      chap('c3', 2, [sec('c1s', 0)]), // 去掉那条跨章依赖
+    ]
+    expect(withLong.width).toBeGreaterThan(computeTreeLayout(noLong).width)
+  })
+
+  it('虚拟通道点不会漏进 nodes（它不该被渲染成方块）', () => {
+    const l = computeTreeLayout(LONG)
+    expect(l.nodes).toHaveLength(4)
+    expect(l.nodes.every((n) => !n.id.startsWith('~'))).toBe(true)
   })
 
   it('指向不存在的小节不画线（悬空依赖）', () => {
