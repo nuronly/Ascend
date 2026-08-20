@@ -14,6 +14,26 @@ export interface User {
   }
 }
 
+/** AI 联网检索后推荐的参考资料。url 已经过后端白名单校验（不会是编造的） */
+export interface Resource {
+  title: string
+  url: string
+  /** 来源域名，直接展示给用户判断可信度 */
+  source: string
+  kind: 'paper' | 'doc' | 'article' | 'video'
+  /** 0 普通 · 1 可信 · 2 权威（一手来源） */
+  authority: number
+  /** 一句话说明为什么值得读 */
+  why?: string
+}
+
+export const RESOURCE_KIND_LABEL: Record<string, string> = {
+  paper: '论文',
+  doc: '文档',
+  article: '文章',
+  video: '视频',
+}
+
 export interface SectionBrief {
   id: string
   idx: number
@@ -46,6 +66,7 @@ export interface Course {
   created_at: string
   chapters: ChapterBrief[]
   stats: { sections?: number; completed?: number; cards?: number }
+  resources?: Resource[]
 }
 
 export interface SectionDetail {
@@ -56,6 +77,7 @@ export interface SectionDetail {
   content_status: SectionBrief['content_status']
   key_concepts: string[]
   prerequisite_ids: string[]
+  resources?: Resource[]
   regenerate_count: number
   completed: boolean
   chapter: { id: string; title: string; idx: number }

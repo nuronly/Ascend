@@ -29,7 +29,11 @@ from app.models.course import (  # noqa: E402
     Course,
     Section,
 )
-from app.services.course import _persist_outline  # noqa: E402
+from app.services.course import (  # noqa: E402
+    _persist_outline,
+    _top_found,
+    _verify_resources,
+)
 
 
 class FakeScope:
@@ -237,12 +241,107 @@ class Test结构:
         assert course.title == "T"
 
 
+FOUND = {
+    "https://arxiv.org/abs/1706.03762": {
+        "title": "Attention Is All You Need",
+        "url": "https://arxiv.org/abs/1706.03762",
+        "source": "arxiv.org",
+        "kind": "paper",
+        "authority": 2,
+        "score": 0.4,
+    },
+    "https://blog.example.com/attn": {
+        "title": "图解注意力",
+        "url": "https://blog.example.com/attn",
+        "source": "blog.example.com",
+        "kind": "article",
+        "authority": 0,
+        "score": 0.9,
+    },
+}
+
+
+class Test推荐资料的来源校验:
+    """★ 学习场景里编造来源比不给来源糟得多：学习者点进去发现 404，
+    从此不再信任任何推荐。所以不能只靠 prompt 约束，必须在落库前校验。"""
+
+    def test_检索里出现过的_url_保留(self):
+        got = _verify_resources(
+            [{"title": "论文", "url": "https://arxiv.org/abs/1706.03762", "kind": "paper", "why": "原文"}],
+            FOUND,
+        )
+        assert len(got) == 1
+        assert got[0]["source"] == "arxiv.org"
+        assert got[0]["authority"] == 2
+        assert got[0]["why"] == "原文"
+
+    def test_编造的_url_被丢掉(self):
+        # arXiv 编号最容易被模型顺手编出来，看起来毫无破绽
+        got = _verify_resources(
+            [{"title": "看起来很真", "url": "https://arxiv.org/abs/2401.99999"}], FOUND
+        )
+        assert got == []
+
+    def test_没有检索过就一条都不留(self):
+        got = _verify_resources(
+            [{"title": "凭记忆写的", "url": "https://arxiv.org/abs/1706.03762"}], {}
+        )
+        assert got == []
+
+    def test_重复的_url_只留一份(self):
+        u = "https://arxiv.org/abs/1706.03762"
+        got = _verify_resources([{"url": u}, {"url": u}], FOUND)
+        assert len(got) == 1
+
+    def test_权威来源排在前面(self):
+        got = _verify_resources(
+            [{"url": "https://blog.example.com/attn"}, {"url": "https://arxiv.org/abs/1706.03762"}],
+            FOUND,
+        )
+        assert [r["source"] for r in got] == ["arxiv.org", "blog.example.com"]
+
+    def test_标题缺失时用检索结果兜底(self):
+        got = _verify_resources([{"url": "https://arxiv.org/abs/1706.03762"}], FOUND)
+        assert got[0]["title"] == "Attention Is All You Need"
+
+    def test_脏数据不崩(self):
+        assert _verify_resources(None, FOUND) == []
+        assert _verify_resources(["不是字典"], FOUND) == []
+        assert _verify_resources([{"没有url": 1}], FOUND) == []
+
+    def test_小节的延伸阅读直接取权威结果(self):
+        # 小节正文不让模型输出 url，它没机会编造
+        got = _top_found(FOUND, limit=2)
+        assert [r["source"] for r in got] == ["arxiv.org", "blog.example.com"]
+        assert got[0]["kind"] == "paper"
+
+    def test_落库时写进课程(self):
+        scope = FakeScope()
+        course = _course()
+        data = _outline(TWO_CHAPTERS)
+        data["resources"] = [
+            {"url": "https://arxiv.org/abs/1706.03762", "why": "原论文"},
+            {"url": "https://编造的.com/x"},
+        ]
+        asyncio.run(_persist_outline(scope, course, data, found=FOUND))  # type: ignore[arg-type]
+        assert len(course.resources) == 1
+        assert course.resources[0]["url"] == "https://arxiv.org/abs/1706.03762"
+
+    def test_没传_found_时不落任何资料(self):
+        scope = FakeScope()
+        course = _course()
+        data = _outline(TWO_CHAPTERS)
+        data["resources"] = [{"url": "https://arxiv.org/abs/1706.03762"}]
+        asyncio.run(_persist_outline(scope, course, data))  # type: ignore[arg-type]
+        assert course.resources == []
+
+
 def _独立运行() -> int:
     import inspect
     import traceback
 
     ok = bad = 0
-    for cls in (Test依赖翻译, Test剪掉坏边, Test结构):
+    for cls in (Test依赖翻译, Test剪掉坏边, Test结构, Test推荐资料的来源校验):
         print(f"\n{cls.__name__}")
         inst = cls()
         for name in sorted(n for n in dir(inst) if n.startswith("test")):

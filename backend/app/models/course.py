@@ -55,6 +55,11 @@ class Course(Base, TimestampMixin):
     error: Mapped[str | None] = mapped_column(Text)
     # 杂项扩展字段（JSON）。目前存建课时的 extra 附加要求，如 {"extra": "偏重工程实现"}
     meta: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
+    # AI 联网检索后推荐的参考资料（JSON 数组）。
+    # 每项：{title, url, source, kind, authority, why}
+    # ★ 落库前会做 url 白名单校验：只有本次检索里真实出现过的链接才留下。
+    #   模型编造一个看起来对的 url，学习者点进去发现 404，比不给链接严重得多。
+    resources: Mapped[list[Any]] = mapped_column(JSONType, default=list, nullable=False)
 
     # 关联的章节，删课级联删章
     chapters: Mapped[list[Chapter]] = relationship(
@@ -125,6 +130,9 @@ class Section(Base):
     generated_at: Mapped[datetime | None] = mapped_column(TZDateTime)
     # 用户点过「讲浅一点/深一点/换个例子」强制重生成的次数，用于展示「已重生成 N 次」
     regenerate_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # 本节的延伸阅读（JSON 数组，同 Course.resources 的结构）。
+    # 正文生成时若模型联网核实过，检索到的权威结果会落在这里
+    resources: Mapped[list[Any]] = mapped_column(JSONType, default=list, nullable=False)
     # 学习进度：用户标记学完的时间戳；NULL = 未完成。课程详情页据此算完成度
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime)
 

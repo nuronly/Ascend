@@ -116,12 +116,26 @@ async def _migrate_light(conn) -> None:
         if "luhmann_id" in {r[1] for r in rows}:
             await conn.execute(text("ALTER TABLE cards DROP COLUMN luhmann_id"))
             log.info("迁移：cards 表删除 luhmann_id 列")
+
+        # AI 联网检索推荐的参考资料。JSONType 在 SQLite 上落成 TEXT，
+        # 所以默认值给字符串 '[]' 而不是 SQL 的 JSON 字面量
+        for table in ("courses", "sections"):
+            rows = (await conn.execute(text(f"PRAGMA table_info({table})"))).all()
+            if "resources" not in {r[1] for r in rows}:
+                await conn.execute(
+                    text(f"ALTER TABLE {table} ADD COLUMN resources TEXT NOT NULL DEFAULT '[]'")
+                )
+                log.info("迁移：%s 表补充 resources 列", table)
     else:  # pragma: no cover
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE")
         )
         await conn.execute(text("ALTER TABLE sections DROP COLUMN IF EXISTS est_minutes"))
         await conn.execute(text("ALTER TABLE cards DROP COLUMN IF EXISTS luhmann_id"))
+        for table in ("courses", "sections"):
+            await conn.execute(
+                text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS resources JSONB NOT NULL DEFAULT '[]'")
+            )
 
 
 async def _sqlite_checkpoint() -> None:

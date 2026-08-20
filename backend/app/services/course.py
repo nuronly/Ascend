@@ -6,6 +6,7 @@ import json
 import logging
 import re
 from collections.abc import AsyncIterator
+from typing import Any
 
 from sqlalchemy import select
 
@@ -20,6 +21,7 @@ from app.llm import (
     repair_truncated_json,
     stream_chat,
 )
+from app.llm.tools import available_tools
 from app.models.course import (
     COURSE_FAILED,
     COURSE_READY,
@@ -33,6 +35,103 @@ from app.models.course import (
 from app.services import prompts
 
 log = logging.getLogger(__name__)
+
+
+# ─────────────────────────────────────────────────────────────
+# 参考资料
+# ─────────────────────────────────────────────────────────────
+def _collect_found(payload: dict, into: dict[str, dict]) -> None:
+    """把一次检索的结果并入「本次生成里真实见过的 url」白名单。"""
+    for it in payload.get("items") or []:
+        if url := str(it.get("url") or ""):
+            into.setdefault(url, it)
+
+
+def _as_resource(url: str, hit: dict, *, title: str = "", kind: str = "", why: str = "") -> dict:
+    return {
+        "title": (title or str(hit.get("title") or ""))[:200],
+        "url": url,
+        "source": str(hit.get("source") or ""),
+        "kind": kind or str(hit.get("kind") or "article"),
+        "authority": int(hit.get("authority") or 0),
+        "why": why[:200],
+    }
+
+
+def _verify_resources(raw: Any, found: dict[str, dict], limit: int = 6) -> list[dict]:
+    """校验模型给出的推荐资料。
+
+    ★ 只保留 url 在本次检索结果里**真实出现过**的条目。模型很会「顺手」写一个
+      看起来非常对的链接（arXiv 编号尤其容易被编出来），学习者点进去发现 404
+      或者完全不相干的论文 —— 那比不给推荐糟得多，一次就会失去信任。
+      与其相信 prompt 里的约束，不如在这里做白名单校验。
+    """
+    out: list[dict] = []
+    seen: set[str] = set()
+    dropped = 0
+    for r in raw or []:
+        if not isinstance(r, dict):
+            continue
+        url = str(r.get("url") or "").strip()
+        hit = found.get(url)
+        if not hit or url in seen:
+            dropped += 1
+            continue
+        seen.add(url)
+        out.append(
+            _as_resource(
+                url,
+                hit,
+                title=str(r.get("title") or ""),
+                kind=str(r.get("kind") or ""),
+                why=str(r.get("why") or ""),
+            )
+        )
+    if dropped:
+        log.warning("丢弃 %d 条编造或重复的推荐资料（url 不在检索结果里）", dropped)
+    # 权威优先
+    out.sort(key=lambda x: -x["authority"])
+    return out[:limit]
+
+
+def _top_found(found: dict[str, dict], limit: int = 4) -> list[dict]:
+    """直接从检索结果里挑权威的做延伸阅读。
+
+    小节正文不让模型输出 url —— 它没机会编造，也省下一段 JSON 的输出预算。
+    """
+    items = sorted(
+        found.values(),
+        key=lambda x: (-int(x.get("authority") or 0), -float(x.get("score") or 0)),
+    )
+    return [_as_resource(str(it.get("url")), it) for it in items[:limit]]
+
+
+def _tool_sse(ev, found: dict[str, dict]) -> dict:
+    """把工具事件翻成 SSE。
+
+    等待期的空白是最劝退的东西：大纲本来就要一两分钟，中间再插一次静默的
+    联网检索，用户完全无法判断是在干活还是卡死了。所以「正在搜什么、
+    搜到了什么」必须实时说出来。
+    """
+    if ev.phase == "call":
+        return {"event": "tool_call", "data": {"name": ev.name, "detail": ev.detail}}
+    if ev.phase == "result":
+        _collect_found(ev.payload, found)
+        items = [
+            {
+                "title": it.get("title", ""),
+                "url": it.get("url", ""),
+                "source": it.get("source", ""),
+                "kind": it.get("kind", "article"),
+                "authority": it.get("authority", 0),
+            }
+            for it in (ev.payload.get("items") or [])[:6]
+        ]
+        return {
+            "event": "tool_result",
+            "data": {"name": ev.name, "detail": ev.detail, "items": items, "ms": ev.ms},
+        }
+    return {"event": "tool_error", "data": {"name": ev.name, "detail": ev.detail}}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -63,6 +162,8 @@ async def stream_outline(
     buf: list[str] = []
     seen_titles = 0
     thinking_chars = 0
+    # 本次生成过程中真实检索到的 url → 结果项。落库时拿它当白名单校验
+    found: dict[str, dict] = {}
     try:
         async for chunk in stream_chat(
             messages,
@@ -73,9 +174,17 @@ async def stream_outline(
             # 推理模型的思维链要占额度：8000 曾被思维链整个吃光，正文零产出
             max_tokens=16000,
             quota=quota,
+            # 实测 json_mode 与 tools 可以同时用，所以大纲这条「必须输出 JSON」
+            # 的路也能带工具
+            json_mode=True,
+            tools=available_tools(),
         ):
             if chunk.done:
                 break
+            # 工具调用：正在搜什么、搜到了什么，实时说出来
+            if chunk.tool_event:
+                yield _tool_sse(chunk.tool_event, found)
+                continue
             # 思维链：只作为「正在思考」信号透出，不进 buf —— 混进正文会污染大纲 JSON
             if chunk.reasoning:
                 thinking_chars += len(chunk.reasoning)
@@ -109,7 +218,7 @@ async def stream_outline(
             data = json.loads(repaired)
             truncated = True
             log.warning("大纲输出被截断（%d 字符），已修复并保留前面的完整章节", len(raw))
-        await _persist_outline(scope, course, data)
+        await _persist_outline(scope, course, data, found=found)
     except Exception as exc:
         course.status = COURSE_FAILED
         course.error = str(exc)[:1000]
@@ -121,7 +230,13 @@ async def stream_outline(
     # truncated 必须让用户知道：悄悄接受残缺大纲比直接报错更糟
     yield {
         "event": "done",
-        "data": {"course_id": course.id, "title": course.title, "truncated": truncated},
+        "data": {
+            "course_id": course.id,
+            "title": course.title,
+            "truncated": truncated,
+            # 顺带把资料带回去，前端不用再多一次请求
+            "resources": list(course.resources or []),
+        },
     }
 
 
@@ -156,9 +271,13 @@ async def generate_outline(
     return course
 
 
-async def _persist_outline(scope: UserScope, course: Course, data: dict) -> Course:
+async def _persist_outline(
+    scope: UserScope, course: Course, data: dict, *, found: dict[str, dict] | None = None
+) -> Course:
     course.title = (data.get("title") or course.topic).strip()[:500]
     course.description = (data.get("description") or "").strip()
+    # 只有 url 真实出现在本次检索结果里的推荐才留下（见 _verify_resources）
+    course.resources = _verify_resources(data.get("resources"), found or {})
 
     chapters_in = data.get("chapters") or []
     # 丢掉没有小节的空壳章。截断修复后最后一章常常只剩个标题，
@@ -276,7 +395,12 @@ async def stream_section_content(
         yield {"event": "delta", "data": {"text": section.content_md}}
         yield {
             "event": "done",
-            "data": {"section_id": section.id, "cached": True, "length": len(section.content_md)},
+            "data": {
+                "section_id": section.id,
+                "cached": True,
+                "length": len(section.content_md),
+                "resources": list(section.resources or []),
+            },
         }
         return
 
@@ -301,6 +425,7 @@ async def stream_section_content(
 
     buf: list[str] = []
     thinking_chars = 0
+    found: dict[str, dict] = {}
     try:
         async for chunk in stream_chat(
             [
@@ -313,9 +438,14 @@ async def stream_section_content(
             temperature=0.7,
             max_tokens=16000,  # 推理模型思维链占额度，与大纲一致放宽
             quota=quota,
+            tools=available_tools(),
         ):
             if chunk.done:
                 break
+            # 正在核实什么 / 找到了什么，实时说出来
+            if chunk.tool_event:
+                yield _tool_sse(chunk.tool_event, found)
+                continue
             # 思维链只作为「正在思考」信号透出，不进正文
             if chunk.reasoning:
                 thinking_chars += len(chunk.reasoning)
@@ -334,6 +464,10 @@ async def stream_section_content(
     section.content_md = body
     section.content_status = SECTION_READY
     section.generated_at = utcnow()
+    # 延伸阅读直接取检索到的权威结果 —— 不让模型输出 url，它就没机会编造，
+    # 也省下一段 JSON 的输出预算
+    if found:
+        section.resources = _top_found(found)
     await scope.commit()
 
     # 落库后把全文再发一次，让前端与服务端对齐。
@@ -342,7 +476,12 @@ async def stream_section_content(
     yield {"event": "content", "data": {"markdown": body}}
     yield {
         "event": "done",
-        "data": {"section_id": section.id, "cached": False, "length": len(body)},
+        "data": {
+            "section_id": section.id,
+            "cached": False,
+            "length": len(body),
+            "resources": list(section.resources or []),
+        },
     }
 
 

@@ -68,6 +68,8 @@ class CourseOut(BaseModel):
     created_at: str
     chapters: list[ChapterOut] = []
     stats: dict = {}
+    # AI 联网检索后推荐的参考资料（已做过 url 白名单校验）
+    resources: list[Any] = []
 
 
 class UpdateSectionIn(BaseModel):
@@ -129,6 +131,7 @@ async def _course_full(scope: Scope, c: Course) -> CourseOut:
     return CourseOut(
         **_course_brief(c),
         chapters=chapters,
+        resources=list(c.resources or []),
         stats={
             "sections": total,
             "completed": done,
@@ -273,6 +276,7 @@ async def get_section(course_id: str, section_id: str, scope: Scope) -> dict:
         "content_status": section.content_status,
         "key_concepts": list(section.key_concepts or []),
         "prerequisite_ids": [str(x) for x in (section.prerequisite_ids or [])],
+        "resources": list(section.resources or []),
         "regenerate_count": section.regenerate_count,
         "completed": section.completed_at is not None,
         "chapter": {"id": chapter.id, "title": chapter.title, "idx": chapter.idx},

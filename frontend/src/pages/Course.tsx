@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, sse } from '@/lib/api'
@@ -6,6 +6,7 @@ import type { Course } from '@/lib/types'
 import { LEVEL_LABELS } from '@/lib/types'
 import { Badge, Button, Progress, Spinner } from '@/components/ui'
 import SectionTree from '@/components/SectionTree'
+import RunTimeline, { ResourceList, type ToolStep } from '@/components/RunTimeline'
 import { cn } from '@/lib/utils'
 import { toast } from '@/lib/store'
 
@@ -25,60 +26,75 @@ export default function CoursePage() {
   const [outlining, setOutlining] = useState(false)
   const [progress, setProgress] = useState<string[]>([])
   const [thinking, setThinking] = useState(0)
+  const [tools, setTools] = useState<ToolStep[]>([])
   const started = useRef(false)
   // 窄屏下路径图折叠（左右各一半在手机上没法看）
   const [treeOpen, setTreeOpen] = useState(true)
+
+  /** 首次生成与重试共用一套事件处理 —— 两份拷贝迟早会漏掉新事件 */
+  const runOutline = useCallback(
+    (force = false) => {
+      setOutlining(true)
+      setProgress([])
+      setThinking(0)
+      setTools([])
+
+      sse(`/courses/${courseId}/outline/stream${force ? '?force=true' : ''}`, {
+        onEvent: (ev, data) => {
+          if (ev === 'progress' && data?.title) {
+            setProgress((p) => (p.includes(data.title) ? p : [...p, data.title]))
+          }
+          // 推理模型的思维链阶段：正文 JSON 还没开始吐，先让等待可见
+          if (ev === 'thinking') setThinking(data?.chars ?? 0)
+          if (ev === 'tool_call') {
+            setTools((t) => [
+              ...t,
+              { name: data?.name ?? '', query: data?.detail ?? '', state: 'running' },
+            ])
+          }
+          // 结果回填到最后一条 running 上：工具是串行执行的，不会错位
+          if (ev === 'tool_result' || ev === 'tool_error') {
+            const ok = ev === 'tool_result'
+            setTools((t) =>
+              t.map((s, i) =>
+                i === t.length - 1
+                  ? {
+                      ...s,
+                      state: ok ? 'done' : 'error',
+                      detail: data?.detail,
+                      items: data?.items ?? [],
+                    }
+                  : s,
+              ),
+            )
+          }
+        },
+        onDone: () => {
+          setOutlining(false)
+          qc.invalidateQueries({ queryKey: ['course', courseId] })
+          qc.invalidateQueries({ queryKey: ['courses'] })
+        },
+        onError: (m) => {
+          setOutlining(false)
+          toast.error(m)
+          qc.invalidateQueries({ queryKey: ['course', courseId] })
+        },
+      }).catch(() => setOutlining(false))
+    },
+    [courseId, qc],
+  )
 
   useEffect(() => {
     if (!course || started.current) return
     if (course.status !== 'outlining' && course.chapters.length) return
     if (course.status === 'failed') return
-
     started.current = true
-    setOutlining(true)
-    setProgress([])
-    setThinking(0)
-
-    sse(`/courses/${courseId}/outline/stream`, {
-      onEvent: (ev, data) => {
-        if (ev === 'progress' && data?.title) {
-          setProgress((p) => (p.includes(data.title) ? p : [...p, data.title]))
-        }
-        // 推理模型的思维链阶段：正文 JSON 还没开始吐，先让等待可见
-        if (ev === 'thinking') setThinking(data?.chars ?? 0)
-      },
-      onDone: () => {
-        setOutlining(false)
-        qc.invalidateQueries({ queryKey: ['course', courseId] })
-        qc.invalidateQueries({ queryKey: ['courses'] })
-      },
-      onError: (m) => {
-        setOutlining(false)
-        toast.error(m)
-        qc.invalidateQueries({ queryKey: ['course', courseId] })
-      },
-    }).catch(() => setOutlining(false))
-  }, [course, courseId, qc])
+    runOutline()
+  }, [course, runOutline])
 
   const retry = () => {
     started.current = false
-    setOutlining(true)
-    setProgress([])
-    setThinking(0)
-    sse(`/courses/${courseId}/outline/stream?force=true`, {
-      onEvent: (ev, data) => {
-        if (ev === 'progress' && data?.title) setProgress((p) => [...p, data.title])
-        if (ev === 'thinking') setThinking(data?.chars ?? 0)
-      },
-      onDone: () => {
-        setOutlining(false)
-        qc.invalidateQueries({ queryKey: ['course', courseId] })
-      },
-      onError: (m) => {
-        setOutlining(false)
-        toast.error(m)
-      },
-    }).catch(() => setOutlining(false))
+    runOutline(true)
   }
 
   const remove = async () => {
@@ -165,7 +181,7 @@ export default function CoursePage() {
         </div>
       )}
 
-      {/* ── 大纲生成中 ── */}
+      {/* ── 大纲生成中：把每一步摆出来，不让人对着转圈傻等 ── */}
       {outlining && (
         <div className="mt-10 p-5 border border-dashed border-[var(--border-strong)] rounded-[var(--radius-lg)]">
           <div className="flex items-center gap-2 text-[13.5px] font-medium">
@@ -173,28 +189,10 @@ export default function CoursePage() {
             正在设计课程结构…
           </div>
           <p className="text-[12.5px] text-[var(--text-muted)] mt-1.5">
-            这一步用的是最强的模型，大约需要一到两分钟。它在规划章节的递进关系和小节之间的前置依赖。
+            这一步用的是最强的模型，大约需要一到两分钟。它会先联网核对这个领域的知识体系，
+            再规划章节递进和小节之间的前置依赖。
           </p>
-          {/* 推理模型先跑思维链再吐大纲 JSON —— 思考阶段把状态亮出来，不像断了 */}
-          {thinking > 0 && progress.length === 0 && (
-            <p className="flex items-center gap-1.5 text-[12px] text-[var(--text-subtle)] mt-2.5">
-              <span className="size-1.5 rounded-full bg-[var(--accent)] animate-pulse shrink-0" />
-              AI 正在深入思考…（已推理 {thinking.toLocaleString()} 字）
-            </p>
-          )}
-          {progress.length > 0 && (
-            <div className="mt-4 space-y-1 max-h-[280px] overflow-y-auto">
-              {progress.map((t, i) => (
-                <div
-                  key={`${t}-${i}`}
-                  className="flex items-center gap-2 text-[12.5px] text-[var(--text-muted)] animate-fade-up"
-                >
-                  <span className="size-1 rounded-full bg-[var(--accent)] shrink-0" />
-                  <span className="truncate">{t}</span>
-                </div>
-              ))}
-            </div>
-          )}
+          <RunTimeline thinking={thinking} tools={tools} titles={progress} className="mt-4" />
         </div>
       )}
 
@@ -209,6 +207,11 @@ export default function CoursePage() {
             重新生成
           </Button>
         </div>
+      )}
+
+      {/* ── AI 检索到的参考资料 ── */}
+      {!!course.resources?.length && (
+        <ResourceList items={course.resources} className="mt-9" />
       )}
 
       {/* ── 章节列表 ── */}
