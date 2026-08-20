@@ -375,7 +375,12 @@ async def collapse(card_id: str, body: CollapseIn, scope: Scope) -> dict:
 
 @router.post("/{card_id}/vault")
 async def vault(card_id: str, scope: Scope, user: CurrentUser) -> dict:
-    """draft → vault。进图谱、进第二大脑、进 FSRS。"""
+    """纳入检索与复习。
+
+    ★ 划词卡不再需要它：建卡即 vault，回答写完自动补摘要与索引
+      （见 services/card.stream_answer）。卡片没有「待整理」这种中间态了。
+    ★ 现在它的用户是**笔记**：草稿 →「收进笔记」是用户的一次明确决定。
+    """
     card = await scope.require_card(card_id)
     await svc.to_vault(scope, card, quota=user_quota(user))
     await scope.session.refresh(card)
@@ -384,7 +389,11 @@ async def vault(card_id: str, scope: Scope, user: CurrentUser) -> dict:
 
 @router.post("/bulk-state")
 async def bulk_state(body: BulkStateIn, scope: Scope, user: CurrentUser) -> dict:
-    """番茄结束时的批量整理 —— 勾选哪些进 vault、哪些丢弃（PLAN §3.3）。"""
+    """批量改状态。
+
+    卡片已经没有「整理」这一步，所以这里剩下的实际用途是**丢弃**
+    （state=archived）—— 番茄结束时把随手划的废卡清掉。
+    """
     cards = await scope.all(scope.select(Card).where(Card.id.in_(body.card_ids)))
     for c in cards:
         if body.state == STATE_VAULT and c.state != STATE_VAULT:

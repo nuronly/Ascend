@@ -9,9 +9,8 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import AsyncIterator
-from datetime import timedelta
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 
 from app.core.config import TIER_SMALL, TIER_STANDARD
 from app.core.scope import UserScope
@@ -19,12 +18,9 @@ from app.core.types import new_id, utcnow
 from app.llm import Message, chat_json, stream_chat
 from app.models.card import (
     ORIGIN_PARENT_ANSWER,
-    ORIGIN_PARENT_NOTE,
     ORIGIN_SOURCE_TEXT,
-    STATE_DRAFT,
     STATE_VAULT,
     Card,
-    CardLink,
     CardMessage,
 )
 from app.models.learning import POMO_RUNNING, Pomodoro
@@ -130,7 +126,11 @@ async def create_card(
         parent_card_id=parent_card_id,
         depth=depth,
         pomodoro_id=await _active_pomodoro_id(scope),
-        state=STATE_DRAFT,
+        # ★ 卡片不再有状态分类。原来是 draft →（用户点"收进仓库"）→ vault，
+        #   但那个动作没人愿意做，也没人理解它在做什么：卡片就是卡片，
+        #   划下来它就存在。索引与摘要在回答写完时自动补（见 stream_answer 尾部）。
+        state=STATE_VAULT,
+        vaulted_at=utcnow(),
         touch_count=1,
         last_touched_at=utcnow(),
     )
@@ -275,6 +275,16 @@ async def stream_answer(
     card.ai_answer = text  # 始终保留最新一条回答，供检索与摘要
     await scope.commit()
 
+    # ★ 答完就自动补摘要与索引，不再等用户点「收进仓库」。
+    #   摘要用小模型（几百 token），换来的是每一张卡都能被检索到、能进复习 ——
+    #   而原来那个手动动作的实际效果是「大部分卡永远停在 draft，等于不存在」。
+    #   失败不影响这次问答：卡和回答都已经落库了。
+    try:
+        await enrich_card(scope, card, quota=quota)
+        await index_card(scope, card)
+    except Exception:
+        log.warning("卡片自动索引失败（不影响本次问答）", exc_info=True)
+
     yield {
         "event": "done",
         "data": {"card_id": card.id, "message_id": answer_id, "content": text},
@@ -358,11 +368,12 @@ async def index_card(scope: UserScope, card: Card) -> None:
 
 
 async def to_vault(scope: UserScope, card: Card, *, quota: int | None = None) -> Card:
-    """收进仓库。
+    """把一张卡（或一份笔记）纳入检索与复习。
 
-    Folium 的告诫（PLAN §1.3）：卡片要"处理过"，不是摘抄堆积。
-    所以 UI 上默认填入 AI 摘要但光标停在正文，鼓励用户改一句；
-    改过的卡标记为「己见卡」，在图上有不同视觉标记。
+    ★ 对**划词卡**这一步已经自动化：建卡即 state=vault，回答写完自动补索引，
+      用户不必再点「收进仓库」—— 那个动作没人愿意做，也没人理解它在做什么。
+    ★ 对**笔记卡**它仍是用户的一次明确决定（草稿 → 收进笔记），
+      因为「我改完了，这份算数」本来就该由人来说。
     """
     card.state = STATE_VAULT
     card.vaulted_at = utcnow()
@@ -410,44 +421,5 @@ async def delete_card(scope: UserScope, card: Card) -> None:
     await scope.commit()
 
 
-# ─────────────────────────────────────────────────────────────
-# 防坟场三件套之三：孤岛卡（PLAN §3.2.1）
-# ─────────────────────────────────────────────────────────────
-async def orphan_cards(scope: UserScope, days: int = 30, limit: int = 50) -> list[Card]:
-    """长期未触碰且无链接的卡 —— 提示归并或删除。
-
-    刻意用"褪色"而不是颜色表达腐烂（PLAN §4.3.2）。
-    """
-    from sqlalchemy.orm import aliased
-
-    from app.models.card import LINK_REAL
-
-    cutoff = utcnow() - timedelta(days=days)
-
-    # 有 real link 就不算孤岛；potential 不算 —— 那只是系统的猜测，不是用户的判断
-    has_real_link = (
-        select(CardLink.id)
-        .where(
-            CardLink.user_id == scope.user_id,
-            CardLink.kind == LINK_REAL,
-            or_(CardLink.from_card_id == Card.id, CardLink.to_card_id == Card.id),
-        )
-        .exists()
-    )
-    # 有子卡也不算孤岛 —— 它是一条追问链的起点
-    kid = aliased(Card)
-    has_child = select(kid.id).where(kid.parent_card_id == Card.id).exists()
-
-    stmt = (
-        scope.select(Card)
-        .where(
-            Card.state == STATE_VAULT,
-            Card.parent_card_id.is_(None),
-            or_(Card.last_touched_at.is_(None), Card.last_touched_at < cutoff),
-            ~has_real_link,
-            ~has_child,
-        )
-        .order_by(Card.last_touched_at.asc())
-        .limit(limit)
-    )
-    return await scope.all(stmt)
+# 孤岛卡（长期未触碰且无连线）已删除：它的定义建立在全局图谱之上，
+# 而图谱这一整块已经撤掉。卡片现在绑定在小节与笔记上，"有没有归属"不再是问题。

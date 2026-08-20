@@ -159,6 +159,18 @@ async def _migrate_light(conn) -> None:
                 text("ALTER TABLE cards ADD COLUMN note_sources TEXT NOT NULL DEFAULT '[]'")
             )
             log.info("迁移：cards 表补充 note_sources 列")
+
+        # 卡片不再有状态分类：历史上停在 draft 的划词卡一次性转正。
+        # 它们本来就是用户划下来的东西，只是当初没人愿意点那个「收进仓库」——
+        # 留在 draft 等于永远不进检索、不进复习，实际效果是「不存在」。
+        # 笔记卡的 draft 不动（那是「我还没改完」的真实状态）
+        n = (
+            await conn.execute(
+                text("UPDATE cards SET state='vault' WHERE state='draft' AND kind='card'")
+            )
+        ).rowcount
+        if n:
+            log.info("迁移：%d 张停在 draft 的卡片转正（卡片不再有状态分类）", n)
     else:  # pragma: no cover
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE")

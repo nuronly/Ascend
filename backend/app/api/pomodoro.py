@@ -18,7 +18,7 @@ from sqlalchemy import func, select
 from app.api.cards import card_dict
 from app.api.deps import CurrentUser, Scope
 from app.core.types import new_id, utcnow
-from app.models.card import STATE_ARCHIVED, STATE_DRAFT, Card
+from app.models.card import STATE_ARCHIVED, Card
 from app.models.learning import (
     POMO_ABANDONED,
     POMO_COMPLETED,
@@ -123,7 +123,9 @@ async def finish(
         scope.select(Card)
         .where(
             Card.pomodoro_id == p.id,
-            Card.state == STATE_DRAFT,
+            # 卡片不再有 draft/vault 分类，所以这里给的是「这颗番茄期间产生的卡」，
+            # 而不是「待整理的卡」—— 后者的前提（要用户手动整理）已经不存在了
+            Card.state != STATE_ARCHIVED,
         )
         .order_by(Card.created_at)
     )

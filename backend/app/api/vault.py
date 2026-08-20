@@ -5,10 +5,14 @@
   心理上的完结。卡片因此降级为素材层（仍是划词追问的产物、问题图的节点、
   复习单元），主界面换成真正能读的笔记。
 
-拒绝坟场，靠三件套：
-  1. FSRS 排程主动推送      → review.py
-  2. 上下文唤醒             → review.py /wakeup
-  3. 孤岛卡提示 + 未消化的疑问计数 → 本文件 /orphans、/notes
+★ 卡片不再有状态分类。原来是 draft →（用户点「收进仓库」）→ vault，但那个动作
+  没人愿意做也没人理解：卡片就是卡片，划下来它就存在，索引与摘要在回答写完时
+  自动补（services/card.stream_answer 尾部）。state 字段保留，只剩 archived
+  还有意义（清理）。笔记卡的 draft → vault 保留 —— 「我改完了，这份算数」
+  本来就该由人来说。
+
+拒绝坟场现在靠：FSRS 排程主动推送 + 上下文唤醒（都在 review.py）。
+孤岛卡那一路随全局图谱一起撤了。
 """
 
 from __future__ import annotations
@@ -21,17 +25,14 @@ from app.api.deps import Scope
 from app.models.card import (
     KIND_CARD,
     KIND_NOTE,
-    LINK_REAL,
     STATE_ARCHIVED,
     STATE_DRAFT,
     STATE_VAULT,
     Card,
-    CardLink,
 )
 from app.models.course import Chapter, Course, Section
 from app.models.learning import ReviewState
 from app.search.fts import search_cards_fts
-from app.services import card as svc
 from app.services import note as note_svc
 
 router = APIRouter(prefix="/vault", tags=["vault"])
@@ -144,17 +145,8 @@ async def notebook(scope: Scope) -> dict:
     return await note_svc.notebook(scope)
 
 
-@router.get("/orphans")
-async def orphans(scope: Scope, days: int = Query(30, ge=1, le=365)) -> dict:
-    """孤岛卡：长期未触碰且无链接。
-
-    视觉上用「褪色」而非颜色表达腐烂 —— 颜色留给语义层（PLAN §4.3.2）。
-    """
-    cards = await svc.orphan_cards(scope, days=days)
-    return {
-        "cards": [card_dict(c, with_messages=False) for c in cards],
-        "hint": "这些卡长期没被碰过，也没有任何连线。归并到别的卡，或者删掉？",
-    }
+# 孤岛卡端点已删除：它的定义建立在全局图谱之上，而图谱整块已撤。
+# 卡片现在绑定在小节与笔记上，「有没有归属」不再是一个问题。
 
 
 @router.get("/overview")
@@ -229,14 +221,6 @@ async def overview(scope: Scope) -> dict:
         "notes_done": int(notes_done or 0),
         # 界面已不展示（见函数注释），保留供导出与历史数据兼容
         "rewrite_rate": round(int(rewritten or 0) / vaulted, 3) if vaulted else 0.0,
-        "real_links": int(
-            await scope.session.scalar(
-                select(func.count(CardLink.id)).where(
-                    CardLink.user_id == scope.user_id, CardLink.kind == LINK_REAL
-                )
-            )
-            or 0
-        ),
         "by_course": [{"id": i, "title": t, "count": n} for i, t, n in by_course],
         "top_concepts": sorted(
             ({"name": k, "count": v} for k, v in top_concepts.items()),

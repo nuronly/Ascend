@@ -280,7 +280,6 @@ from app.api import (  # noqa: E402
     documents,
     export,
     feedback,
-    graph,
     guide,
     pomodoro,
     review,
@@ -294,7 +293,8 @@ for r in (
     documents.router,
     pomodoro.router,
     vault.router,
-    graph.router,
+    # 全局图谱（graph）已整块撤除：卡片不再是一张需要俯瞰的网，
+    # 它绑定在小节与笔记上。卡片空间里的连线仍在（cards.py 的 /links）。
     brain.router,
     review.router,
     badges.router,

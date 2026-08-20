@@ -40,16 +40,10 @@ const STEPS: StepDef[] = [
     to: 'section',
   },
   {
-    key: 'vault_card',
-    title: '把卡收进仓库',
-    desc: '顺手用自己的话改一句，再收 —— 那叫「己见」',
+    key: 'make_note',
+    title: '把这一节收成笔记',
+    desc: '学完在右栏点一下，卡片和原文会汇成一张笔记，然后改成你自己的话',
     to: 'section',
-  },
-  {
-    key: 'view_graph',
-    title: '打开图谱',
-    desc: '看你的问题连成了什么形状',
-    to: '/graph',
   },
   {
     key: 'ask_brain',
@@ -122,7 +116,7 @@ export function GuideTour({ onClose }: { onClose: () => void }) {
           </button>
         </div>
         <p className="text-[11.5px] text-[var(--text-muted)] mt-1 leading-relaxed">
-          六步走完产品主路径，每步都是亲手操作。
+          五步走完产品主路径，每步都是亲手操作。
         </p>
         {/* 进度条 */}
         <div className="mt-2.5 h-1 rounded-full bg-[var(--bg-sunken)] overflow-hidden">

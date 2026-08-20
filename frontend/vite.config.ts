@@ -33,11 +33,11 @@ export default defineConfig({
     chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
-        // 图谱和画布只在部分页面用到，拆出去让首屏更轻
+        // 画布与 Markdown 渲染只在部分页面用到，拆出去让首屏更轻。
+        // cytoscape 这一块已随全局图谱一起移除（依赖也从 package.json 卸掉了）
         manualChunks: {
           react: ['react', 'react-dom', 'react-router-dom'],
           flow: ['@xyflow/react'],
-          cytoscape: ['cytoscape'],
           markdown: ['react-markdown', 'remark-gfm', 'remark-math', 'rehype-katex', 'rehype-sanitize', 'katex'],
         },
       },

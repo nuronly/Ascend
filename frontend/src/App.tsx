@@ -17,7 +17,6 @@ import SectionPage from './pages/Section'
 import DocumentsPage from './pages/Documents'
 import DocReaderPage from './pages/DocReader'
 import VaultPage from './pages/Vault'
-import GraphPage from './pages/Graph'
 import BrainPage from './pages/Brain'
 import ReviewPage from './pages/Review'
 import BadgesPage from './pages/Badges'
@@ -122,8 +121,8 @@ export default function App() {
                         <Route path="/notes" element={<VaultPage />} />
                         <Route path="/vault" element={<VaultPage />} />
                         <Route path="/badges" element={<BadgesPage />} />
-                        <Route path="/graph" element={<GraphPage />} />
-                        <Route path="/graph/:courseId" element={<GraphPage />} />
+                        {/* 全局图谱已整块撤除：卡片不再是一张需要俯瞰的网，
+                            它绑定在小节与笔记上。小节内的连线仍在卡片空间里 */}
                         <Route path="/brain" element={<BrainPage />} />
                         <Route path="/review" element={<ReviewPage />} />
                         <Route path="/settings" element={<SettingsPage />} />

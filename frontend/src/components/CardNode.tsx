@@ -220,7 +220,7 @@ export const CardNode = memo(function CardNode({ data }: NodeProps) {
   const selected = useCardSpace((s) => s.focusCardId === card.id)
   const setHover = useCardSpace((s) => s.setHover)
   const setFocus = useCardSpace((s) => s.setFocus)
-  const { ask, toVault, toggleCollapse, remove, stopStreaming, regenerate } = useCardSpace()
+  const { ask, toggleCollapse, remove, stopStreaming, regenerate } = useCardSpace()
 
   const [followUp, setFollowUp] = useState('')
   const [showContext, setShowContext] = useState(false)
@@ -229,7 +229,6 @@ export const CardNode = memo(function CardNode({ data }: NodeProps) {
   const [nestHintSeen, dismissNestHint] = useOnceHint(NEST_HINT_KEY)
 
   const width = widthForDepth(card.depth)
-  const isVault = card.state === 'vault'
   const messages = card.messages ?? []
   // 只在「第一张根卡刚拿到回答」时提示一次，之后永不打扰
   const showNestHint =
@@ -248,9 +247,8 @@ export const CardNode = memo(function CardNode({ data }: NodeProps) {
         onClick={() => toggleCollapse(card.id)}
         className={cn(
           'flex items-center gap-2 h-9 px-2.5 cursor-pointer',
-          'bg-[var(--bg-raised)] border rounded-[var(--radius)]',
+          'bg-[var(--bg-raised)] border border-[var(--border)] rounded-[var(--radius)]',
           'shadow-[var(--shadow-float)] transition-all',
-          isVault ? 'border-solid border-[var(--border-strong)]' : 'border-dashed border-[var(--border)]',
           (selected || isHovered) && 'ring-2 ring-[color-mix(in_oklch,var(--accent)_35%,transparent)]',
         )}
       >
@@ -260,7 +258,10 @@ export const CardNode = memo(function CardNode({ data }: NodeProps) {
           {card.selected_text || truncate(card.question, 24)}
         </span>
         {card.is_rewritten && (
-          <span className="size-1.5 rounded-full bg-[var(--sem-rewritten)] shrink-0" title="己见卡" />
+          <span
+            className="size-1.5 rounded-full bg-[var(--sem-rewritten)] shrink-0"
+            title="写过我的话"
+          />
         )}
         <Chevron open={false} />
       </div>
@@ -275,8 +276,10 @@ export const CardNode = memo(function CardNode({ data }: NodeProps) {
       onClick={() => setFocus(card.id)}
       className={cn(
         'flex flex-col bg-[var(--bg-raised)] rounded-[var(--radius-lg)]',
-        // 己见卡实心描边，AI 原生卡虚线描边（PLAN §4.3.2）
-        isVault ? 'border border-[var(--border-strong)]' : 'border border-dashed border-[var(--border)]',
+        // ★ 卡片不再有状态分类（原来虚线=未整理、实线=已收进仓库）：
+        //   划下来它就存在，没有「待整理」这种中间态要用户处理。
+        //   唯一保留的视觉标记是「写过我的话」的左侧色条 —— 那是属性，不是状态。
+        'border border-[var(--border)]',
         card.is_rewritten && 'border-l-2 border-l-[var(--sem-rewritten)]',
         // 唯一允许用阴影的地方：卡片要"浮在旁边"而非"压在上面"
         'shadow-[var(--shadow-float)] transition-shadow',
@@ -299,9 +302,6 @@ export const CardNode = memo(function CardNode({ data }: NodeProps) {
           >
             L{card.depth + 1}
           </span>
-        )}
-        {isVault && (
-          <span className="size-1.5 rounded-full bg-[var(--sem-ok)] shrink-0" title="已收进仓库" />
         )}
         <div className="relative shrink-0">
           <button
@@ -476,21 +476,15 @@ export const CardNode = memo(function CardNode({ data }: NodeProps) {
             </button>
           ) : (
             <>
+              {/* 「收进仓库」已删除：卡片不再有状态分类，划下来它就存在，
+                  索引与摘要在回答写完时自动补。剩下的唯一动作是写我的话 —— 那是属性 */}
               {!showNote && (
                 <button
                   onClick={() => setShowNote(true)}
                   title="写下自己的理解"
                   className="shrink-0 h-6 px-2 text-[11.5px] rounded-[var(--radius-sm)] text-[var(--text-muted)] hover:bg-[var(--bg-hover)]"
                 >
-                  ✎
-                </button>
-              )}
-              {!isVault && messages.length > 0 && (
-                <button
-                  onClick={() => toVault(card.id)}
-                  className="shrink-0 h-6 px-2 text-[11.5px] font-medium rounded-[var(--radius-sm)] bg-[var(--accent)] text-[var(--accent-text)] hover:bg-[var(--accent-hover)]"
-                >
-                  收进仓库
+                  ✎ 我的话
                 </button>
               )}
             </>

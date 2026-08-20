@@ -178,8 +178,8 @@ export default function CoursePage() {
 
         {hasTree && (
           <div className="flex gap-1.5 shrink-0">
-            <Button size="sm" variant="ghost" onClick={() => nav(`/graph/${courseId}`)}>
-              问题图
+            <Button size="sm" variant="ghost" onClick={() => nav('/notes')}>
+              笔记
             </Button>
             <Button size="sm" variant="ghost" onClick={remove}>
               删除
