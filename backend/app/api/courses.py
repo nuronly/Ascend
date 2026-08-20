@@ -10,6 +10,7 @@ from sqlalchemy import delete, func, select
 
 from app.api.deps import CurrentUser, Scope, user_quota
 from app.api.sse import sse_response
+from app.core.scope import UserScope
 from app.core.types import new_id, utcnow
 from app.models.card import Card, STATE_ARCHIVED
 from app.models.course import (
@@ -22,6 +23,7 @@ from app.models.course import (
     Section,
 )
 from app.services import course as svc
+from app.services.runstream import cancel_run, outline_key, section_key, stream_run
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -221,8 +223,18 @@ async def stream_outline(
     course.error = None
     await scope.commit()
 
+    quota = user_quota(user)
+
+    async def gen(sc: UserScope):
+        # 后台任务有自己的 session，ORM 对象必须在那边重新取 —— 复用请求这个
+        # course 实例的话，它的改动落不进库（对象不属于新 session）
+        c = await sc.require(Course, course_id, "课程")
+        async for ev in svc.stream_outline(sc, c, quota=quota):
+            yield ev
+
+    # 建课后用户常常先切走。大纲要跑一两分钟，掐掉等于白烧一次旗舰模型
     return await sse_response(
-        svc.stream_outline(scope, course, quota=user_quota(user)), request
+        stream_run(outline_key(course_id), scope.user_id, gen, restart=force), request
     )
 
 
@@ -237,6 +249,13 @@ async def get_course(course_id: str, scope: Scope) -> CourseOut:
 @router.delete("/{course_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_course(course_id: str, scope: Scope) -> None:
     course = await scope.require(Course, course_id, "课程")
+    # 后台可能正在给这门课写大纲或正文。行都要没了，让它跑完只会写成孤儿数据
+    cancel_run(outline_key(course_id))
+    for sid in await scope.all(
+        select(Section.id).join(Chapter, Chapter.id == Section.chapter_id)
+        .where(Chapter.course_id == course_id)
+    ):
+        cancel_run(section_key(str(sid)))
     await scope.session.delete(course)
     await scope.commit()
 
@@ -300,9 +319,21 @@ async def stream_section(
     if course.id != course_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "小节不属于该课程")
 
+    quota = user_quota(user)
+
+    def gen(sc: UserScope):
+        return svc.stream_section_content(
+            sc, section_id, adjust=adjust, force=force, quota=quota
+        )
+
+    # ★ 切走再回来要能接着看，而不是从零重写。换难度（adjust）与重生成
+    #   算另一次生成，得把在跑的那次顶掉，否则两份会抢着写同一行
     return await sse_response(
-        svc.stream_section_content(
-            scope, section_id, adjust=adjust, force=force, quota=user_quota(user)
+        stream_run(
+            section_key(section_id),
+            scope.user_id,
+            gen,
+            restart=force or bool(adjust),
         ),
         request,
     )

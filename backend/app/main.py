@@ -55,7 +55,11 @@ async def lifespan(_: FastAPI):
         )
     yield
     from app.llm.registry import close_all
+    from app.services.runstream import shutdown_runs
 
+    # 后台还在跑的生成注定丢（正文没落库），至少干净地收掉，
+    # 别留一串"task was destroyed but it is pending"的噪音
+    await shutdown_runs()
     await close_all()
     await dispose_db()
 

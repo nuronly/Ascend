@@ -52,7 +52,10 @@ async def sse_response(
         task = asyncio.create_task(pump())
         try:
             while True:
-                # 客户端关页面时立刻停掉生成，别把 token 烧在没人看的响应上
+                # 客户端关页面就别继续往一条死连接上写了。
+                # 注意这只是**退订**：走 services/runstream 的大纲与正文生成
+                # 会在后台继续跑到落库（切走再回来能接着看）；其余短流
+                # （卡片提问、翻译）本来就便宜，随连接一起结束即可。
                 if request is not None and await request.is_disconnected():
                     break
                 try:
