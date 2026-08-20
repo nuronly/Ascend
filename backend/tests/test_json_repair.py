@@ -2,15 +2,24 @@
 
 大纲是这套系统里唯一"格式错一个字符就整份报废"的产物：
 正文截断了还能读，JSON 截断了就是 100% 失败。所以这里的边界要钉死。
+
+没装 pytest 也能跑：python tests/test_json_repair.py
+（本项目所有测试都要能这样单跑 —— 服务器和干净环境里都没有 pytest）
 """
 
 from __future__ import annotations
 
 import json
+import sys
+from pathlib import Path
 
-import pytest
+_BACKEND = Path(__file__).resolve().parents[1]
+if str(_BACKEND) not in sys.path:
+    sys.path.insert(0, str(_BACKEND))
 
-from app.llm import extract_json, repair_truncated_json
+import pytest  # noqa: E402
+
+from app.llm import extract_json, repair_truncated_json  # noqa: E402
 
 
 class TestRepairTruncatedJson:
@@ -92,3 +101,35 @@ class TestOutlineRecovery:
         ]
         assert len(kept) == 2
         assert [c["title"] for c in kept] == ["第 1 章 为什么需要注意力", "第 2 章 QKV"]
+
+
+# ─────────────────────────────────────────────────────────────
+def _独立运行() -> int:
+    """没装 pytest 时的 runner。
+
+    这个文件是套件里唯一用了 parametrize 的，所以 runner 要自己把参数拆开跑 ——
+    否则它就成了"只有装了 pytest 才跑得动"的孤例，而服务器上没有 pytest。
+    """
+    ok = failed = 0
+    for cls in (TestRepairTruncatedJson, TestOutlineRecovery):
+        inst = cls()
+        for name in sorted(n for n in dir(inst) if n.startswith("test_")):
+            fn = getattr(inst, name)
+            cases: list[tuple] = [()]
+            for mark in getattr(fn, "pytestmark", []):
+                if getattr(mark, "name", "") == "parametrize":
+                    values = mark.args[1]
+                    cases = [v if isinstance(v, tuple) else (v,) for v in values]
+            for args in cases:
+                try:
+                    fn(*args)
+                    ok += 1
+                except Exception as exc:  # noqa: BLE001
+                    failed += 1
+                    print(f"  ✗ {cls.__name__}.{name}{args or ''}: {exc!r}")
+    print(f"通过 {ok} · 失败 {failed}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_独立运行())
