@@ -3,31 +3,27 @@ import { useNavigate } from 'react-router-dom'
 import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import type { Card, VaultOverview } from '@/lib/types'
-import { Badge, Button, Empty, Input, Modal, Segmented } from '@/components/ui'
+import { Badge, Button, Empty, Input, Modal } from '@/components/ui'
 import { Markdown } from '@/components/Markdown'
-import { cn, relativeTime, futureTime, truncate } from '@/lib/utils'
+import { cn, relativeTime } from '@/lib/utils'
 import { toast } from '@/lib/store'
 
 /**
- * ★ 主界面是「笔记」，不是「卡片仓库」
+ * ★ 笔记（原「灵感仓库」）
  *
- * 卡片整理进仓库其实没人回来看，病因有四个：
- *   1. 粒度太碎 —— 一张卡是「一个疑问 + 一段回答」，脱离语境读不懂
- *   2. 卡片网格不是阅读单元 —— 那是数据库视图，人不会「浏览列表」
- *   3. 「归档」这个动作本身就是心理上的完结，天然不产生回访
- *   4. 它是**过程产物**而不是成果。把草稿箱当主界面，没人会天天翻
+ * 卡片整理进仓库其实没人回来看：粒度太碎、网格不是阅读单元、「归档」本身就是
+ * 心理上的完结，而且它是**过程产物**而不是成果。
  *
- * 所以卡片降级为素材层（它仍然是划词追问的产物、问题图的节点、复习单元），
- * 主界面换成笔记 —— 一个真正能读、且有明确回访理由的单元。
+ * 所以这一页只有笔记。**卡片不再是独立存在的东西** —— 它绑定在小节
+ * （source_section_id）和笔记（note_sources）上，唯一入口是小节页的卡片空间。
+ * 这里既没有「疑问」栏，也不统计「未消化的疑问」：那又是在把过程产物摆上台面。
+ *
+ * 己见率也撤了。它当初挂在卡片上，而现在「整理」这件事发生在笔记里
+ * （笔记的「我的理解」那一节），再按卡片算比例既不准也没人看。
  *
  * 分组按「课程 → 小节」而不是时间流：回访路径是「我要复习注意力那节」，
- * 不是「我三周前记了什么」。时间流适合日志，不适合知识。
- *
- * 「未消化的疑问」是卡片降级之后的安全阀：还没被任何笔记吸收的卡片有多少。
- * 它给用户一个明确的行动，而不是一个被藏起来的角落。
+ * 不是「我三周前记了什么」。
  */
-
-type Tab = 'notes' | 'cards' | 'orphans'
 
 interface NoteItem {
   card_id: string
@@ -50,11 +46,7 @@ interface NoteGroup {
 export default function VaultPage() {
   const nav = useNavigate()
   const qc = useQueryClient()
-  const [tab, setTab] = useState<Tab>('notes')
-  const [cardState, setCardState] = useState<'vault' | 'draft'>('vault')
   const [q, setQ] = useState('')
-  const [rewrittenOnly, setRewrittenOnly] = useState(false)
-  const [sort, setSort] = useState<'recent' | 'touched' | 'depth'>('recent')
   const [detail, setDetail] = useState<Card | null>(null)
 
   const { data: overview } = useQuery({
@@ -62,29 +54,26 @@ export default function VaultPage() {
     queryFn: () => api.get<VaultOverview>('/vault/overview'),
   })
 
-  /* ── 笔记：按课程分组 ── */
-  const { data: notebook, isFetching: notesLoading } = useQuery({
+  /* 分组视图：无搜索词时的主视图 */
+  const { data: notebook, isFetching } = useQuery({
     queryKey: ['notebook'],
-    queryFn: () => api.get<{ groups: NoteGroup[]; undigested: number }>('/vault/notes'),
+    queryFn: () => api.get<{ groups: NoteGroup[] }>('/vault/notes'),
+    enabled: !q.trim(),
   })
 
-  /* ── 疑问（卡片）：降级为素材视图 ── */
-  const { data, isFetching } = useQuery<{ total?: number; cards: Card[]; hint?: string }>({
-    queryKey: ['vault', tab, cardState, q, rewrittenOnly, sort],
+  /* 搜索：笔记多了必然要搜，这时切成平铺结果 */
+  const { data: found, isFetching: searching } = useQuery({
+    queryKey: ['note-search', q],
     queryFn: () => {
-      if (tab === 'orphans') return api.get<{ cards: Card[]; hint: string }>('/vault/orphans')
-      const p = new URLSearchParams({ state: cardState, kind: 'card', sort, limit: '100' })
-      if (q.trim()) p.set('q', q.trim())
-      if (rewrittenOnly) p.set('rewritten', 'true')
+      const p = new URLSearchParams({ kind: 'note', state: 'all', limit: '60', q: q.trim() })
       return api.get<{ total: number; cards: Card[] }>(`/vault?${p}`)
     },
-    enabled: tab !== 'notes',
+    enabled: !!q.trim(),
     placeholderData: keepPreviousData,
   })
 
-  const cards = data?.cards ?? []
   const groups = notebook?.groups ?? []
-  const noteTotal = groups.reduce((n, g) => n + g.notes.length, 0)
+  const results = found?.cards ?? []
 
   const openDetail = async (id: string) => {
     const full = await api.get<Card>(`/cards/${id}`).catch(() => null)
@@ -92,23 +81,26 @@ export default function VaultPage() {
   }
 
   const remove = async (id: string) => {
-    if (!confirm(detail?.kind === 'note' ? '删除这份笔记？' : '删除这张卡？它的子卡会一并删除。'))
-      return
+    if (!confirm('删除这份笔记？（它引用的卡片不会被删）')) return
     await api.del(`/cards/${id}`)
     setDetail(null)
-    qc.invalidateQueries({ queryKey: ['vault'] })
     qc.invalidateQueries({ queryKey: ['notebook'] })
+    qc.invalidateQueries({ queryKey: ['note-search'] })
     qc.invalidateQueries({ queryKey: ['vault-overview'] })
     toast.ok('已删除')
   }
 
-  const vault = async (id: string) => {
+  const keep = async (id: string) => {
     await api.post(`/cards/${id}/vault`)
-    qc.invalidateQueries({ queryKey: ['vault'] })
     qc.invalidateQueries({ queryKey: ['notebook'] })
     qc.invalidateQueries({ queryKey: ['vault-overview'] })
-    toast.ok('已沉淀')
+    setDetail(null)
+    toast.ok('已收进笔记')
   }
+
+  /** 跳回原文小节。panel=note 时右栏直接停在笔记上 */
+  const goSection = (courseId: string, sectionId: string, panel?: 'note') =>
+    nav(`/courses/${courseId}/sections/${sectionId}${panel ? `?panel=${panel}` : ''}`)
 
   return (
     <div className="max-w-[1000px] w-full mx-auto px-8 py-10 pb-24">
@@ -129,105 +121,74 @@ export default function VaultPage() {
         </div>
       </div>
 
-      {/* 概览：以笔记为主口径，「未消化的疑问」是可行动的那一个 */}
-      {(noteTotal > 0 || !!overview?.total) && (
+      {/* 指标只留笔记口径 */}
+      {!!overview?.notes && (
         <div className="mt-6 flex flex-wrap gap-x-8 gap-y-3">
           {[
-            { label: '笔记', v: noteTotal },
-            {
-              label: '未消化的疑问',
-              v: notebook?.undigested ?? 0,
-              tip: '这些卡片所在的小节还没有笔记 —— 去把它们收成笔记',
-              accent: (notebook?.undigested ?? 0) > 0,
-              onClick: () => setTab('cards'),
-            },
-            {
-              label: '己见率',
-              v: `${Math.round((overview?.rewrite_rate ?? 0) * 100)}%`,
-              tip: '写过自己理解的比例 —— 比学习时长诚实得多',
-            },
-            { label: '疑问总数', v: overview?.total ?? 0 },
-            { label: '手建关联', v: overview?.real_links ?? 0 },
+            { label: '笔记', v: overview.notes },
+            { label: '已收进', v: overview.notes_done ?? 0 },
+            // 标签刻意不叫「草稿」—— 那个词在列表里是徽标，两处同名会让人分不清
+            { label: '还没收进', v: (overview.notes ?? 0) - (overview.notes_done ?? 0) },
           ].map((s) => (
-            <button
-              key={s.label}
-              title={s.tip}
-              onClick={s.onClick}
-              className={cn('text-left', s.onClick && 'cursor-pointer')}
-            >
+            <div key={s.label}>
               <div className="text-[11px] text-[var(--text-subtle)]">{s.label}</div>
-              <div
-                className={cn(
-                  'text-[19px] font-semibold tabular-nums tracking-[-0.02em]',
-                  s.accent && 'text-[var(--sem-rewritten)]',
-                )}
-              >
+              <div className="text-[19px] font-semibold tabular-nums tracking-[-0.02em]">
                 {s.v}
               </div>
-            </button>
+            </div>
           ))}
         </div>
       )}
 
-      {/* 工具栏 */}
-      <div className="mt-8 flex flex-wrap items-center gap-2 sticky top-0 z-10 bg-[var(--bg)] py-2 -my-2">
-        <Segmented
-          value={tab}
-          onChange={setTab}
-          options={[
-            { value: 'notes', label: '笔记' },
-            { value: 'cards', label: '疑问', title: '划词提问留下的卡片 —— 笔记的素材层' },
-            { value: 'orphans', label: '孤岛卡' },
-          ]}
+      <div className="mt-7 flex items-center gap-2">
+        <Input
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          placeholder="搜索笔记…"
+          className="w-64 h-8 text-[12.5px]"
         />
-        {tab === 'cards' && (
-          <>
-            <Segmented
-              size="xs"
-              value={cardState}
-              onChange={setCardState}
-              options={[
-                { value: 'vault', label: '已沉淀' },
-                { value: 'draft', label: '未整理' },
-              ]}
-            />
-            <Input
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              placeholder="搜索卡片…"
-              className="w-52 h-7 text-[12.5px]"
-            />
-            <button
-              onClick={() => setRewrittenOnly((v) => !v)}
-              className={cn(
-                'h-7 px-2.5 text-[12px] rounded-[var(--radius)] border transition-colors',
-                rewrittenOnly
-                  ? 'border-[var(--sem-rewritten)] text-[var(--sem-rewritten)] bg-[color-mix(in_oklch,var(--sem-rewritten)_10%,transparent)]'
-                  : 'border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)]',
-              )}
-            >
-              仅己见卡
-            </button>
-            <Segmented
-              size="xs"
-              value={sort}
-              onChange={setSort}
-              options={[
-                { value: 'recent', label: '最新' },
-                { value: 'touched', label: '最近触碰' },
-                { value: 'depth', label: '最深' },
-              ]}
-            />
-          </>
-        )}
         <div className="grow" />
-        {(isFetching || notesLoading) && (
+        {(isFetching || searching) && (
           <span className="text-[11.5px] text-[var(--text-subtle)]">加载中…</span>
         )}
       </div>
 
-      {/* ── 笔记视图 ── */}
-      {tab === 'notes' && (
+      {/* ── 搜索结果（平铺）── */}
+      {q.trim() ? (
+        <div className="mt-5">
+          {!results.length ? (
+            <Empty title="没有匹配的笔记" />
+          ) : (
+            <div className="space-y-1.5">
+              {results.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => openDetail(c.id)}
+                  className={cn(
+                    'w-full text-left p-3.5 border rounded-[var(--radius-lg)] transition-colors',
+                    'border-[var(--border)] hover:bg-[var(--bg-hover)]',
+                  )}
+                >
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-[13.5px] font-medium">{c.question}</span>
+                    {c.state !== 'vault' && <Badge>草稿</Badge>}
+                    <div className="grow" />
+                    {c.origin_info?.course_title && (
+                      <span className="text-[10.5px] text-[var(--text-subtle)] truncate max-w-[40%]">
+                        {c.origin_info.course_title}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-[12.5px] text-[var(--text-muted)] mt-1.5 line-clamp-2 leading-relaxed">
+                    {(c.user_note || c.ai_answer).replace(/^#+\s.*$/gm, '').trim().slice(0, 160)}
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      ) : (
+        /* ── 主视图：按课程 → 小节 ── */
         <div className="mt-5">
           {!groups.length ? (
             <Empty
@@ -253,171 +214,56 @@ export default function VaultPage() {
 
                   <div className="mt-2.5 space-y-1.5">
                     {g.notes.map((n) => (
-                      <button
+                      <div
                         key={n.card_id}
-                        onClick={() => openDetail(n.card_id)}
                         className={cn(
-                          'group w-full text-left p-3.5 border rounded-[var(--radius-lg)] transition-colors',
+                          'group relative border rounded-[var(--radius-lg)] transition-colors',
                           'hover:bg-[var(--bg-hover)]',
                           n.edited
                             ? 'border-[var(--border)] border-l-2 border-l-[var(--sem-rewritten)]'
                             : 'border-[var(--border)]',
                         )}
                       >
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-[13.5px] font-medium">{n.title}</span>
-                          {n.state !== 'vault' && <Badge>草稿</Badge>}
-                          {n.edited && (
-                            <span className="text-[10.5px] text-[var(--sem-rewritten)]">
-                              已改写
-                            </span>
-                          )}
-                          <div className="grow" />
-                          {n.cards > 0 && (
-                            <span className="text-[10.5px] text-[var(--text-subtle)] shrink-0">
-                              {n.cards} 张卡
-                            </span>
-                          )}
-                        </div>
-                        {n.excerpt && (
-                          <div className="text-[12.5px] text-[var(--text-muted)] mt-1.5 line-clamp-2 leading-relaxed">
-                            {n.excerpt}
+                        <button
+                          onClick={() => openDetail(n.card_id)}
+                          className="w-full text-left p-3.5"
+                        >
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="text-[13.5px] font-medium">{n.title}</span>
+                            {n.state !== 'vault' && <Badge>草稿</Badge>}
+                            {n.edited && (
+                              <span className="text-[10.5px] text-[var(--sem-rewritten)]">
+                                已改写
+                              </span>
+                            )}
+                            <div className="grow" />
+                            {n.cards > 0 && (
+                              <span className="text-[10.5px] text-[var(--text-subtle)] shrink-0">
+                                吃进 {n.cards} 张卡
+                              </span>
+                            )}
                           </div>
-                        )}
-                      </button>
+                          {n.excerpt && (
+                            <div className="text-[12.5px] text-[var(--text-muted)] mt-1.5 line-clamp-2 leading-relaxed">
+                              {n.excerpt}
+                            </div>
+                          )}
+                        </button>
+                        {/* 跳回原文：读笔记时经常想回去核对一句，这个入口不该藏在弹窗里 */}
+                        <button
+                          onClick={() => goSection(g.course_id, n.section_id)}
+                          className="absolute right-2.5 bottom-2.5 opacity-0 group-hover:opacity-100 transition-opacity text-[11px] text-[var(--text-muted)] hover:text-[var(--accent)]"
+                        >
+                          看原文 →
+                        </button>
+                      </div>
                     ))}
                   </div>
                 </section>
               ))}
             </div>
           )}
-
-          {/* 卡片降级之后的安全阀：别让它们变成没人管的角落 */}
-          {!!notebook?.undigested && (
-            <div className="mt-8 px-3.5 py-3 border border-dashed border-[var(--border-strong)] rounded-[var(--radius-lg)]">
-              <div className="text-[12.5px]">
-                你有 <span className="font-semibold tabular-nums">{notebook.undigested}</span>{' '}
-                张卡还没进任何笔记
-              </div>
-              <p className="text-[11.5px] text-[var(--text-muted)] mt-1 leading-relaxed">
-                它们所在的小节还没生成笔记。去那几节点一下「生成本节笔记」，
-                这些疑问就会被吸收进你自己的话里。
-              </p>
-              <Button size="xs" variant="outline" onClick={() => setTab('cards')} className="mt-2">
-                看看是哪些
-              </Button>
-            </div>
-          )}
         </div>
-      )}
-
-      {/* ── 疑问 / 孤岛卡（素材层）── */}
-      {tab !== 'notes' && (
-        <>
-          {tab === 'cards' && (
-            <div className="mt-4 text-[11.5px] text-[var(--text-subtle)] leading-relaxed">
-              这些是划词提问留下的卡片，它们是笔记的素材 ——
-              真正值得回头读的是笔记，这里用来搜索、整理和补漏。
-            </div>
-          )}
-          {tab === 'orphans' && cards.length > 0 && (
-            <div className="mt-4 px-3.5 py-2.5 text-[12.5px] leading-relaxed text-[var(--text-muted)] border border-dashed border-[var(--border-strong)] rounded-[var(--radius)]">
-              这些卡长期没被碰过，也没有任何连线。归并到别的卡，或者删掉？
-              <span className="opacity-70"> 拒绝坟场，就得定期清理。</span>
-            </div>
-          )}
-
-          <div className="mt-4">
-            {!cards.length ? (
-              <Empty
-                title={
-                  tab === 'orphans'
-                    ? '没有孤岛卡'
-                    : cardState === 'draft'
-                      ? '没有未整理的卡'
-                      : q
-                        ? '没有匹配的卡片'
-                        : '还没有沉淀的卡片'
-                }
-                hint={tab === 'orphans' ? '每张卡都有归属，很好。' : undefined}
-              />
-            ) : (
-              <div className="grid gap-2 sm:grid-cols-2">
-                {cards.map((c) => {
-                  const due = c.due_date ? new Date(c.due_date).getTime() <= Date.now() : false
-                  return (
-                    <button
-                      key={c.id}
-                      onClick={() => openDetail(c.id)}
-                      className={cn(
-                        'group text-left p-3.5 border rounded-[var(--radius-lg)] transition-colors',
-                        'hover:bg-[var(--bg-hover)]',
-                        c.is_rewritten
-                          ? 'border-[var(--border)] border-l-2 border-l-[var(--sem-rewritten)]'
-                          : 'border-[var(--border)]',
-                        // 孤岛卡用「褪色」表达腐烂，不用颜色（颜色留给语义层）
-                        tab === 'orphans' && 'opacity-55 hover:opacity-100',
-                      )}
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[13.5px] font-medium text-[var(--accent)] truncate">
-                          ⟨{c.selected_text || truncate(c.question, 20)}⟩
-                        </span>
-                        <div className="grow" />
-                        {due && (
-                          <Badge tone="due" className="shrink-0">
-                            待复习
-                          </Badge>
-                        )}
-                      </div>
-
-                      <div className="text-[12.5px] text-[var(--text-muted)] mt-1.5 line-clamp-3 leading-relaxed">
-                        {c.summary || c.question || truncate(c.ai_answer, 140)}
-                      </div>
-
-                      {!!c.concept_tags.length && (
-                        <div className="flex flex-wrap gap-1 mt-2.5">
-                          {c.concept_tags.slice(0, 4).map((t) => (
-                            <span
-                              key={String(t)}
-                              className="px-1.5 h-[18px] inline-flex items-center rounded-[3px] bg-[var(--bg-sunken)] text-[10.5px] text-[var(--text-subtle)]"
-                            >
-                              {String(t)}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-
-                      <div className="flex items-center gap-2 mt-2.5 text-[10.5px] text-[var(--text-subtle)]">
-                        {c.origin_info?.course_title && (
-                          <>
-                            <span className="truncate max-w-[45%]">
-                              {c.origin_info.course_title}
-                            </span>
-                            <span className="opacity-40">·</span>
-                          </>
-                        )}
-                        <span>{relativeTime(c.created_at)}</span>
-                        {c.depth > 0 && (
-                          <>
-                            <span className="opacity-40">·</span>
-                            <span>第 {c.depth + 1} 层</span>
-                          </>
-                        )}
-                        {c.is_rewritten && (
-                          <>
-                            <span className="opacity-40">·</span>
-                            <span className="text-[var(--sem-rewritten)]">己见</span>
-                          </>
-                        )}
-                      </div>
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </>
       )}
 
       {/* 详情 */}
@@ -425,29 +271,21 @@ export default function VaultPage() {
         open={!!detail}
         onClose={() => setDetail(null)}
         width="max-w-2xl"
-        title={
-          detail
-            ? detail.kind === 'note'
-              ? `📓 ${detail.question || detail.selected_text}`
-              : `⟨${detail.selected_text || truncate(detail.question, 24)}⟩`
-            : ''
-        }
+        title={detail ? `📓 ${detail.question || detail.selected_text}` : ''}
         subtitle={
           detail && (
             <span className="flex flex-wrap items-center gap-2">
               <span>{relativeTime(detail.created_at)}</span>
-              {detail.origin_info?.section_title && (
+              {detail.origin_info?.course_title && (
                 <>
                   <span className="opacity-40">·</span>
-                  <span>{detail.origin_info.section_title}</span>
+                  <span>{detail.origin_info.course_title}</span>
                 </>
               )}
-              {detail.due_date && (
+              {detail.state !== 'vault' && (
                 <>
                   <span className="opacity-40">·</span>
-                  <span className="text-[var(--sem-due)]">
-                    复习：{futureTime(detail.due_date)}
-                  </span>
+                  <span>草稿</span>
                 </>
               )}
             </span>
@@ -461,31 +299,38 @@ export default function VaultPage() {
               </Button>
               <div className="grow" />
               {detail.state !== 'vault' && (
-                <Button variant="primary" size="sm" onClick={() => vault(detail.id)}>
-                  {detail.kind === 'note' ? '收进笔记' : '沉淀'}
+                <Button variant="primary" size="sm" onClick={() => keep(detail.id)}>
+                  收进笔记
                 </Button>
               )}
               {detail.origin_info?.course_id && detail.source_section_id && (
-                <Button
-                  size="sm"
-                  onClick={() =>
-                    nav(
-                      `/courses/${detail.origin_info!.course_id}/sections/${detail.source_section_id}`,
-                    )
-                  }
-                >
-                  {detail.kind === 'note' ? '去这一节修改' : '回到原文'}
-                </Button>
+                <>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() =>
+                      goSection(detail.origin_info!.course_id!, detail.source_section_id!)
+                    }
+                  >
+                    看原文小节
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() =>
+                      goSection(detail.origin_info!.course_id!, detail.source_section_id!, 'note')
+                    }
+                  >
+                    修改笔记
+                  </Button>
+                </>
               )}
             </>
           )
         }
       >
-        {detail?.kind === 'note' ? (
-          /* ★ 笔记卡：正文就是笔记本身。
-             它没有问答轮次，内容在 user_note（你的终稿）或 ai_answer（AI 原稿）里 ——
-             照问答排版走会渲染成一片空白。 */
+        {detail && (
           <div className="space-y-4">
+            {/* 笔记正文：终稿优先，没改过就是 AI 原稿 */}
             <Markdown variant="read">{detail.user_note || detail.ai_answer}</Markdown>
             {detail.is_rewritten && detail.ai_answer && detail.user_note && (
               <details className="pt-2 border-t border-[var(--border)]">
@@ -498,53 +343,6 @@ export default function VaultPage() {
               </details>
             )}
           </div>
-        ) : (
-          detail && (
-            <div className="space-y-4">
-              {detail.context_text && (
-                <blockquote className="text-[12.5px] text-[var(--text-muted)] leading-relaxed border-l-2 border-[var(--border-strong)] pl-3">
-                  {detail.context_text}
-                </blockquote>
-              )}
-
-              {(detail.messages ?? []).map((m) => (
-                <div key={m.id} className="flex gap-2">
-                  <span
-                    className={cn(
-                      'shrink-0 text-[11px] font-semibold mt-[2px]',
-                      m.role === 'user' ? 'text-[var(--text-subtle)]' : 'text-[var(--accent)]',
-                    )}
-                  >
-                    {m.role === 'user' ? 'Q' : 'A'}
-                  </span>
-                  <div className="min-w-0 grow">
-                    {m.role === 'user' ? (
-                      <div className="text-[13px] text-[var(--text-muted)]">{m.content}</div>
-                    ) : (
-                      <Markdown variant="card">{m.content}</Markdown>
-                    )}
-                  </div>
-                </div>
-              ))}
-
-              {detail.user_note && (
-                <div>
-                  <div className="text-[11px] text-[var(--text-subtle)] mb-1">✎ 我的话</div>
-                  <div className="text-[13px] leading-relaxed whitespace-pre-wrap border-l-2 border-[var(--sem-rewritten)] pl-3 py-1 bg-[color-mix(in_oklch,var(--sem-rewritten)_6%,transparent)] rounded-r-[var(--radius-sm)]">
-                    {detail.user_note}
-                  </div>
-                </div>
-              )}
-
-              {!!detail.concept_tags.length && (
-                <div className="flex flex-wrap gap-1.5 pt-1">
-                  {detail.concept_tags.map((t) => (
-                    <Badge key={String(t)}>{String(t)}</Badge>
-                  ))}
-                </div>
-              )}
-            </div>
-          )
         )}
       </Modal>
     </div>

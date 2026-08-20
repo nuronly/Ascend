@@ -205,6 +205,8 @@ async def stream_section_note(
         context_text=section.summary or "",
         concept_tags=[str(k) for k in (section.key_concepts or [])][:6],
         state=STATE_DRAFT,  # 用户改完点保存才 → vault（复用现有状态机）
+        # 卡片绑定在小节与笔记上，不再独立存在：记下这一份吃进了哪几张卡
+        note_sources=[c.id for c in cards],
         created_at=utcnow(),
         updated_at=utcnow(),
     )
@@ -239,11 +241,10 @@ async def notebook(scope: UserScope) -> dict:
       笔记的回访路径是「我要复习 Transformer 的注意力那节」，不是「我三周前
       记了什么」。时间流适合日志，不适合知识。
 
-    ★ undigested（未消化的疑问）
-      卡片被降级之后最大的风险是它们没人管了。这个数字就是安全阀：还没被任何
-      笔记吸收的卡片有多少 —— 它给用户一个明确的行动，而不是一个被藏起来的角落。
-      口径是**小节粒度的近似**：这张卡所属的小节还没有笔记卡，就算未消化。
-      精确到「笔记正文是否真的引用了它」代价太大，而这个近似足够驱动行动。
+    ★ 卡片不出现在这里
+      卡片不是独立存在的东西，它绑定在小节（source_section_id）与笔记
+      （note_sources）上，入口只有小节页的卡片空间。笔记页不再有「疑问」栏，
+      也不再统计「未消化的疑问」—— 那又是在把过程产物摆到台面上。
     """
     from app.models.course import Chapter, Course, Section
 
@@ -260,7 +261,7 @@ async def notebook(scope: UserScope) -> dict:
         ).all()
     )
 
-    # 每节有多少张划词卡（笔记条目上显示「3 张卡」，让人知道它吃进了什么）
+    # 每节有多少张划词卡（笔记条目上显示「吃进 3 张卡」，让人知道它由什么汇成）
     counts = dict(
         (
             await scope.session.execute(
@@ -295,7 +296,8 @@ async def notebook(scope: UserScope) -> dict:
                 "edited": card.is_rewritten,
                 # 摘要剥掉 Markdown 标题行，否则列表里全是「## 这一节解决了什么问题」
                 "excerpt": _excerpt(body),
-                "cards": int(counts.get(section.id, 0)),
+                # 优先用落库时记下的来源；老数据没有这个字段就退回按小节数
+                "cards": len(card.note_sources or []) or int(counts.get(section.id, 0)),
                 "updated_at": card.updated_at.isoformat() if card.updated_at else None,
             }
         )
@@ -314,14 +316,7 @@ async def notebook(scope: UserScope) -> dict:
     for cid, g in groups.items():
         g["sections_total"] = int(totals.get(cid, 0))
 
-    # 未消化：所属小节还没有笔记卡的划词卡
-    covered = {str(s.id) for _, s, _, _ in rows}
-    undigested = 0
-    for sid, n in counts.items():
-        if sid and str(sid) not in covered:
-            undigested += int(n)
-
-    return {"groups": list(groups.values()), "undigested": undigested}
+    return {"groups": list(groups.values())}
 
 
 def _excerpt(md: str, limit: int = 160) -> str:

@@ -86,6 +86,12 @@ class Card(Base, TimestampMixin):
     user_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     is_rewritten: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # 是否写过己见的冗余标记（查询方便）
 
+    # ★ 笔记卡吸收了哪些划词卡（id 数组）。
+    #   卡片不再是独立存在的东西 —— 它绑定在「小节」和「笔记」上：
+    #   小节靠 source_section_id，笔记靠这个字段。有了它，笔记才能反向展开
+    #   「我当时问过什么」，卡片也才第一次有了阅读语境。
+    note_sources: Mapped[list[Any]] = mapped_column(JSONType, default=list, nullable=False)
+
     # ── 写入期抽取（PLAN §3.6 第 1 步：把检索难度前移到写入期）──
     summary: Mapped[str] = mapped_column(Text, default="", nullable=False)  # 入 vault 时 AI 抽的一句话摘要，供第二大脑检索
     concept_tags: Mapped[list[Any]] = mapped_column(JSONType, default=list, nullable=False)  # 概念标签列表，关联概念图用

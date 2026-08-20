@@ -235,12 +235,17 @@ export interface Citation {
 }
 
 export interface VaultOverview {
+  /** 划词卡（疑问）总数 */
   total: number
   vaulted: number
   drafts: number
   rewritten: number
+  /** 已从界面撤下：己见现在写在笔记里，按卡片算比例既不准也没人看 */
   rewrite_rate: number
   real_links: number
+  /** 笔记口径 —— 主界面是笔记，指标也以它为主 */
+  notes?: number
+  notes_done?: number
   by_course: { id: string; title: string; count: number }[]
   top_concepts: { name: string; count: number }[]
 }

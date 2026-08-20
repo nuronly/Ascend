@@ -19,6 +19,8 @@ from sqlalchemy import Integer, func, select
 from app.api.cards import card_dict
 from app.api.deps import Scope
 from app.models.card import (
+    KIND_CARD,
+    KIND_NOTE,
     LINK_REAL,
     STATE_ARCHIVED,
     STATE_DRAFT,
@@ -157,7 +159,13 @@ async def orphans(scope: Scope, days: int = Query(30, ge=1, le=365)) -> dict:
 
 @router.get("/overview")
 async def overview(scope: Scope) -> dict:
-    """仓库概览：给首页仪表盘用。"""
+    """概览：给首页与笔记页用。
+
+    ★ 己见率（rewrite_rate）已从界面撤下。它当初是「比学习时长诚实」的深度指标，
+      但那时己见挂在卡片上；现在整理发生在笔记里（笔记的「我的理解」那一节），
+      再按卡片算一个比例就既不准也没人看。字段暂留以兼容历史数据与导出，
+      界面不再展示。
+    """
     total, vaulted, drafts, rewritten = (
         await scope.session.execute(
             select(
@@ -165,7 +173,25 @@ async def overview(scope: Scope) -> dict:
                 func.sum(func.cast(Card.state == STATE_VAULT, Integer)),
                 func.sum(func.cast(Card.state == STATE_DRAFT, Integer)),
                 func.sum(func.cast(Card.is_rewritten, Integer)),
-            ).where(Card.user_id == scope.user_id, Card.state != STATE_ARCHIVED)
+            ).where(
+                Card.user_id == scope.user_id,
+                Card.state != STATE_ARCHIVED,
+                Card.kind == KIND_CARD,
+            )
+        )
+    ).one()
+
+    # 笔记口径：主界面是笔记，指标也该以它为主
+    notes_total, notes_done = (
+        await scope.session.execute(
+            select(
+                func.count(Card.id),
+                func.sum(func.cast(Card.state == STATE_VAULT, Integer)),
+            ).where(
+                Card.user_id == scope.user_id,
+                Card.kind == KIND_NOTE,
+                Card.state != STATE_ARCHIVED,
+            )
         )
     ).one()
 
@@ -199,7 +225,9 @@ async def overview(scope: Scope) -> dict:
         "vaulted": vaulted,
         "drafts": int(drafts or 0),
         "rewritten": int(rewritten or 0),
-        # 己见率：比学习时长诚实得多的深度指标（PLAN §1.3）
+        "notes": int(notes_total or 0),
+        "notes_done": int(notes_done or 0),
+        # 界面已不展示（见函数注释），保留供导出与历史数据兼容
         "rewrite_rate": round(int(rewritten or 0) / vaulted, 3) if vaulted else 0.0,
         "real_links": int(
             await scope.session.scalar(

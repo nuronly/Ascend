@@ -45,8 +45,6 @@ export default function HomePage() {
     nav(`/new?${qs}`)
   }
 
-  const rate = overview?.rewrite_rate ?? 0
-
   return (
     <div className="max-w-[880px] w-full mx-auto px-8 py-12">
       {/* ── 开课 ── */}
@@ -114,34 +112,29 @@ export default function HomePage() {
         </div>
       </div>
 
-      {/* ── 认知资产概览 ── */}
-      {!!overview?.total && (
-        <div className="mt-12 grid grid-cols-2 sm:grid-cols-4 gap-px bg-[var(--border)] border border-[var(--border)] rounded-[var(--radius-lg)] overflow-hidden">
+      {/* ── 认知资产概览 ──
+           以笔记为口径。己见率撤了：它当初挂在卡片上，而现在「整理」发生在笔记里
+           （笔记的「我的理解」那一节），再按卡片算比例既不准也没人看。 */}
+      {!!(overview?.notes || overview?.total) && (
+        <button
+          onClick={() => nav('/notes')}
+          className="mt-12 w-full grid grid-cols-2 sm:grid-cols-4 gap-px bg-[var(--border)] border border-[var(--border)] rounded-[var(--radius-lg)] overflow-hidden text-left hover:border-[var(--border-strong)] transition-colors"
+        >
           {[
-            { label: '卡片', value: overview.total, hint: '你提过的问题' },
-            { label: '已沉淀', value: overview.vaulted, hint: '进了仓库和图谱' },
-            {
-              label: '己见率',
-              value: `${Math.round(rate * 100)}%`,
-              hint: '写过自己理解的比例',
-              accent: rate >= 0.4,
-            },
-            { label: '手建关联', value: overview.real_links, hint: '你亲自连的线' },
+            { label: '笔记', value: overview?.notes ?? 0, hint: '每节学完留下的' },
+            { label: '已收进', value: overview?.notes_done ?? 0, hint: '进了检索与复习' },
+            { label: '疑问', value: overview?.total ?? 0, hint: '划词问过的' },
+            { label: '手建关联', value: overview?.real_links ?? 0, hint: '你亲自连的线' },
           ].map((s) => (
             <div key={s.label} className="bg-[var(--bg)] px-4 py-3.5">
               <div className="text-[11px] text-[var(--text-subtle)]">{s.label}</div>
-              <div
-                className={cn(
-                  'text-[22px] font-semibold tabular-nums leading-tight mt-0.5 tracking-[-0.02em]',
-                  s.accent && 'text-[var(--sem-rewritten)]',
-                )}
-              >
+              <div className="text-[22px] font-semibold tabular-nums leading-tight mt-0.5 tracking-[-0.02em]">
                 {s.value}
               </div>
               <div className="text-[10.5px] text-[var(--text-subtle)] mt-0.5">{s.hint}</div>
             </div>
           ))}
-        </div>
+        </button>
       )}
 
       {/* ── 课程列表 ── */}

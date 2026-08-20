@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, sse } from '@/lib/api'
 import { useCardSpace } from '@/lib/cardSpace'
@@ -51,8 +51,12 @@ export default function SectionPage() {
   const [tools, setTools] = useState<ToolStep[]>([])
   const [adjustOpen, setAdjustOpen] = useState(false)
   const [narrowDrawer, setNarrowDrawer] = useState(false)
-  // 右栏两件事：卡片空间（本节的追问树）/ 笔记卡（这一节的汇流产物）
-  const [rightTab, setRightTab] = useState<'cards' | 'note'>('cards')
+  // 右栏两件事：卡片空间（本节的追问树）/ 笔记卡（这一节的汇流产物）。
+  // ?panel=note 让「从笔记页点进来修改」直接停在笔记上，不用再点一次
+  const [params] = useSearchParams()
+  const [rightTab, setRightTab] = useState<'cards' | 'note'>(
+    params.get('panel') === 'note' ? 'note' : 'cards',
+  )
   const [justCompleted, setJustCompleted] = useState(false)
 
   const cards = useCardSpace((s) => s.cards)
