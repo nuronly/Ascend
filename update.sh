@@ -81,10 +81,15 @@ fi
 # 这时脚本不该直接躺倒 —— 依次退到公共镜像。
 # 另外这里刻意不加 -q：静默的 pull 卡住时，用户看到的只是一个不动的光标，
 # 完全无法判断是在下载、在等网络、还是在等着输密码。
+#
+# ★ 只对 github.com 套镜像。ghfast.top 这些只代理 GitHub，原来的 https://*
+#   会把自建 GitLab（比赛平台的 synnovator，恰好就是服务器上的 origin）也
+#   拼成 https://ghfast.top/https://www.synnovator.com/... —— 必然失败，
+#   真到拉不下来那天要白等三次 120 秒超时才给出结论。
 UPSTREAM=$(git remote get-url origin 2>/dev/null || echo '')
 MIRRORS=("")
 case "$UPSTREAM" in
-  https://*) MIRRORS+=("https://ghfast.top/" "https://gh-proxy.com/" "https://ghproxy.net/") ;;
+  https://github.com/*) MIRRORS+=("https://ghfast.top/" "https://gh-proxy.com/" "https://ghproxy.net/") ;;
 esac
 
 PULLED=0

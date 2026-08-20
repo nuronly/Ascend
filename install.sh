@@ -100,7 +100,10 @@ info "安装 Python 依赖（首次约 1~3 分钟）…"
 # 国内加速
 export UV_DEFAULT_INDEX="${UV_DEFAULT_INDEX:-https://pypi.tuna.tsinghua.edu.cn/simple}"
 uv python install 3.12 >/dev/null 2>&1 || true
-uv sync --no-dev -q || die "Python 依赖安装失败"
+# --frozen：严格按 uv.lock 安装、不改写它。理由同 deploy-contest.sh：
+# 不加的话服务器上会永远挂着一份 uv.lock 的脏改动，每次更新都要 stash/pop。
+uv sync --frozen --no-dev -q \
+  || die "Python 依赖安装失败" "若提示 lock 过期：在本地 uv lock 后提交，别在服务器上改"
 ok "后端依赖就绪"
 cd "$ROOT"
 

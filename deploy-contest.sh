@@ -91,7 +91,13 @@ ok "uv $(uv --version | grep -oE '[0-9.]+' | head -1)"
 
 cd "$ROOT/backend"
 info "同步 Python 依赖（uv 会自动装好 Python 3.12）…"
-uv sync --quiet || die "uv sync 失败"
+# ★ --frozen：严格按 uv.lock 安装，不改写它。不加的话 uv 会顺手重排整个
+#   lock 文件（服务器与本地的 uv 版本一有差异就会重排），于是 git 上永远
+#   有一份脏改动，每次 update.sh 都得 stash → pull → pop。哪天这个文件在
+#   仓库里也动了，pop 就冲突，更新会中断在一个很难看懂的地方。
+#   Dockerfile 里本来就是 --frozen，这里只是补齐。
+uv sync --frozen --quiet \
+  || die "uv sync 失败（若提示 lock 过期：在本地跑 uv lock 并提交，不要在服务器上改）"
 ok "后端依赖就绪"
 cd "$ROOT"
 
