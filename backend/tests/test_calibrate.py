@@ -300,14 +300,8 @@ def _fake_stream(*, reasoning: str = "", body: str = _MAP_JSON, boom: Exception 
     return gen
 
 
-def _collect(
-    coro_factory,
-    *,
-    cached: str | None = None,
-    stream=None,
-    quick: dict | Exception | None = None,
-) -> list[dict]:
-    """跑一遍流式生成，收集所有 SSE 事件（缓存、快批、慢批全换成替身）。"""
+def _collect(coro_factory, *, cached: str | None = None, stream=None) -> list[dict]:
+    """跑一遍流式生成，收集所有 SSE 事件（缓存与模型都换成替身）。"""
     real_stream, real_get, real_put, real_json = (
         calibrate.stream_chat, calibrate.cache_get, calibrate.cache_put, calibrate.chat_json,
     )
@@ -319,13 +313,10 @@ def _collect(
     async def fake_put(k, *_a):
         put[k] = "written"
 
-    quick_payload = {"concepts": []} if quick is None else quick
-
-    async def fake_quick(*a, **kw):
-        _REAL_SIG.bind(*a, **kw)
-        if isinstance(quick_payload, Exception):
-            raise quick_payload
-        return quick_payload
+    async def fake_quick(*_a, **_kw):
+        # 校准只该发**一次**调用。曾经并行发过两次（小模型垫场 + 推理模型深想），
+        # 后来确认这个场景根本不需要深思，就该只剩一次流式调用
+        raise AssertionError("概念地图不该再走非流式调用")
 
     calibrate.stream_chat = stream or _fake_stream()  # type: ignore[assignment]
     calibrate.cache_get = fake_get  # type: ignore[assignment]
@@ -420,51 +411,39 @@ class Test流式概念地图:
         assert len(_of(ev, "concept")) == 3
 
 
-class Test快批抢时间:
-    """慢批实测能想 100 秒以上。快批用小模型秒出最外围的几个，先让人有题可答。"""
+class Test不用推理模型:
+    """★ 这个场景刻意不走推理模型：它是枚举，不是设计。
 
-    QUICK = {
-        "concepts": [
-            {"name": "线性代数", "gloss": "向量与矩阵的运算", "depth": 1},
-            {"name": "矩阵乘法", "gloss": "快批也给了这个", "depth": 1},
-        ]
-    }
+    拿中档推理模型跑实测要先想 60~100 秒才吐第一个字，而学习者正等着答第一道题。
+    「不需要深思」是这里最重要的一条设计决定，所以用测试把它钉住 ——
+    哪天有人顺手把它改回 standard，这里会红。
+    """
 
-    def _run(self, **kw):
+    def test_走小模型档位(self):
+        seen: dict[str, object] = {}
+
+        def spy(*a, **kw):
+            _REAL_STREAM_SIG.bind(*a, **kw)
+            seen.update(kw)
+            return _fake_stream()(*a, **kw)
+
         u = _user()
-        return _collect(
-            lambda: calibrate.stream_concept_map(user=u, topic="Transformer"), **kw
+        _collect(lambda: calibrate.stream_concept_map(user=u, topic="X"), stream=spy)
+        assert seen["tier"] == "small"
+
+    def test_prompt_里明确禁止长推理(self):
+        from app.services import prompts
+
+        assert "不要长时间推理" in prompts.CALIBRATE_SYSTEM
+
+    def test_中途失败也要把已经问出去的题算数(self):
+        """已经答过的几道不该白费，前端会拿它们继续。"""
+        u = _user()
+        ev = _collect(
+            lambda: calibrate.stream_concept_map(user=u, topic="X"),
+            stream=_fake_stream(body=_MAP_JSON[:120], boom=None),
         )
-
-    def test_快批的题排在慢批前面(self):
-        """否则用户还是要等一百秒才看到第一道。"""
-        ev = self._run(quick=self.QUICK)
-        names = [c["name"] for c in _of(ev, "concept")]
-        assert names[0] == "线性代数"
-
-    def test_两批重名的只算一次(self):
-        ev = self._run(quick=self.QUICK)
-        names = [c["name"] for c in _of(ev, "concept")]
-        assert names.count("矩阵乘法") == 1
-        # 快批先到，所以留下的是快批那条
-        by = {c["name"]: c for c in _of(ev, "concept")}
-        assert by["矩阵乘法"]["gloss"] == "快批也给了这个"
-
-    def test_序号连续_两批混着也不重号(self):
-        ev = self._run(quick=self.QUICK)
-        idxs = [c["idx"] for c in _of(ev, "concept")]
-        assert idxs == list(range(1, len(idxs) + 1))
-
-    def test_快批挂了不算失败(self):
-        """它只是抢时间的，慢批照样给出完整地图。"""
-        ev = self._run(quick=RuntimeError("小模型 500"))
-        assert len(_of(ev, "concept")) == 3
-        assert _of(ev, "done")[0]["failed"] is False
-
-    def test_慢批挂了还能用快批的题(self):
-        ev = self._run(quick=self.QUICK, stream=_fake_stream(boom=RuntimeError("上游 500")))
-        assert [c["name"] for c in _of(ev, "concept")] == ["线性代数", "矩阵乘法"]
-        assert _of(ev, "done")[0]["failed"] is True
+        assert len(_of(ev, "concept")) >= 1
 
 
 class Test规整单条:
@@ -489,7 +468,7 @@ def _独立运行() -> int:
         Test抽查选题,
         Test自评校验,
         Test流式概念地图,
-        Test快批抢时间,
+        Test不用推理模型,
         Test规整单条,
     ]
     ok = failed = 0

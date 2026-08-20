@@ -33,7 +33,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
@@ -122,118 +121,35 @@ def _map_key(topic: str, extra: str) -> str:
     return cache_key("calibmap", topic.strip().lower(), extra.strip().lower())
 
 
-async def _quick_batch(*, user: User, topic: str, quota: int | None) -> list[dict]:
-    """快批：小模型秒出 5 个最外围的前置概念，先让用户有题可答。
-
-    ★ 这一批的存在理由就是**时间**。慢批（完整地图）实测能想 100 秒以上，
-      哪怕思考过程全程可见，让人等一百秒才答第一道题也是不可接受的 ——
-      而「学这个主题需要什么通识底子」本来就不需要深思。
-    """
-    data = await chat_json(
-        [
-            Message(role="system", content=prompts.CALIBRATE_QUICK_SYSTEM),
-            Message(role="user", content=prompts.calibrate_quick_user(topic)),
-        ],
-        scene="calibrate_quick",
-        tier=TIER_SMALL,
-        user_id=user.id,
-        temperature=0.2,
-        max_tokens=1200,
-        use_cache=True,  # 同一主题所有人共用
-        quota=quota,
-    )
-    return [c for c in (data.get("concepts") or []) if isinstance(c, dict)][:6]
-
-
-async def _deep_batch(
-    *, user: User, topic: str, extra: str, quota: int | None, out: asyncio.Queue
-) -> None:
-    """慢批：完整概念地图（含最深档与目标候选），边生成边往队列里放。"""
-    think = ThinkingBuffer()
-    objects = JsonArrayStream("concepts")
-    buf: list[str] = []
-    total_seen = 0
-    try:
-        async for chunk in stream_chat(
-            [
-                Message(role="system", content=prompts.CALIBRATE_SYSTEM),
-                Message(role="user", content=prompts.calibrate_user(topic, extra)),
-            ],
-            scene="calibrate",
-            tier=TIER_STANDARD,
-            user_id=user.id,
-            temperature=0.3,  # 概念地图要稳定可缓存，不需要创造力
-            # 与大纲一致：思维链也吃这份额度，8000 曾被「Transformer 注意力机制」
-            # 整个吃光（零产出后靠重试救回来，等于白烧一次调用）
-            max_tokens=16000,
-            json_mode=True,
-            quota=quota,
-        ):
-            if chunk.done:
-                break
-            if chunk.reasoning:
-                if pending := think.add(chunk.reasoning):
-                    await out.put(pending)
-                continue
-            if pending := think.flush():  # 开始吐 JSON 了，思考阶段收尾
-                await out.put(pending)
-            if not chunk.delta:
-                continue
-            buf.append(chunk.delta)
-
-            if not total_seen and (m := _TOTAL_PROBE.search("".join(buf))):
-                total_seen = int(m.group(1))
-                await out.put({"event": "total", "data": {"total": min(total_seen, CONCEPT_LIMIT)}})
-
-            for raw in objects.feed(chunk.delta):
-                await out.put({"event": "_concept", "data": raw})
-    finally:
-        # 目标候选与缓存都靠这一步收尾，所以放 finally：即便中途断了，
-        # 已经拿到的那部分也要尽力解析出来
-        raw_text = "".join(buf)
-        goals: list[dict] = []
-        try:
-            try:
-                data = extract_json(raw_text)
-            except ValueError:
-                repaired = repair_truncated_json(raw_text)
-                data = json.loads(repaired) if repaired else {}
-            goals = _shape_goals((data or {}).get("goals"))
-            # 完整才写缓存，免得把半截地图存下来喂给下一个人
-            if isinstance(data, dict) and data.get("concepts") and goals:
-                await cache_put(
-                    _map_key(topic, extra),
-                    "calibrate",
-                    "stream",
-                    json.dumps(data, ensure_ascii=False),
-                )
-        except Exception as exc:  # noqa: BLE001
-            log.warning("概念地图收尾解析失败（目标候选可能缺失）：%s", exc)
-        await out.put({"event": "goals", "data": {"goals": goals}})
-
-
 async def stream_concept_map(
     *, user: User, topic: str, extra: str = "", quota: int | None = None
 ) -> AsyncIterator[dict]:
     """流式产出概念地图：一道一道地出，边出边让人勾。
 
-    ★ 三层手段合起来才让「等待」变成「已经在做事」
+    ★ 这一步刻意**不用深度推理**
 
-      1. **两批并行**。慢批（完整地图，含最深档概念与学习目标）实测要想 100 秒
-         以上；快批用小模型几秒钟给出 5 个最外围的前置基础，用户立刻开始答。
-         等他答完前几道，慢批的深层概念已经陆续到了。
-         两批同时发起 —— 串起来跑就白费了快批的意义。
-      2. **流式**。慢批的每个概念一闭合就推一条，不等整份 JSON 写完。
-      3. **思维链可见**。长推理不是问题，看不见的长推理才是问题。
+      它本质上是「列出这个主题周边的概念」——一个枚举任务，不是设计课程。
+      拿旗舰/中档的推理模型跑，实测要先想 60~100 秒才吐第一个字；而学习者
+      正等着答第一道题。我们试过让思考过程全程可见，也试过用小模型抢一批
+      「外围基础」并行垫场，但那都是在给一个不该存在的等待打补丁：
+      **这个场景就是不需要深思**。所以直接走小模型 + prompt 里明确要求
+      「不要长时间推理」，几秒钟出全套。
 
-      缓存命中时整份瞬间回放：同一主题的第二个人几乎零等待。
-      preset（预勾）不能进缓存 —— 那是每个人自己的已知边界，回放时才算。
+      质量上完全够用：概念名和一句话解释靠的是领域常识，不是推理深度。
+      真正需要深想的是大纲（它决定整门课的结构），那里照旧用旗舰模型。
+
+    仍然保留的三件事：
+      · 流式：每个概念一闭合就推一条，不等整份 JSON 写完
+      · total 先行（prompt 要求它是第一个键），一开始就能说「还剩几道」
+      · 思维链照样透出 —— 小模型通常不吐，吐了也让人看见
+      缓存命中时整份瞬间回放：同一主题的第二个人零等待。
+      preset（预勾）不进缓存 —— 那是每个人自己的已知边界，回放时才算。
     """
     already = {norm(c) for c in (user.known_concepts or [])}
     seen: set[str] = set()
     sent = 0
 
-    # ── 缓存命中：秒回放，连快批都不用发 ──
+    # ── 缓存命中：秒回放 ──
     if cached := await cache_get(_map_key(topic, extra)):
         try:
             data = json.loads(cached)
@@ -250,53 +166,76 @@ async def stream_concept_map(
             yield {"event": "done", "data": {"count": sent, "cached": True}}
             return
 
-    queue: asyncio.Queue[dict] = asyncio.Queue()
-    failed: list[str] = []
+    think = ThinkingBuffer()
+    objects = JsonArrayStream("concepts")
+    buf: list[str] = []
+    total_sent = False
+    failed = ""
 
-    async def quick() -> None:
-        try:
-            for raw in await _quick_batch(user=user, topic=topic, quota=quota):
-                await queue.put({"event": "_concept", "data": raw})
-        except Exception as exc:  # noqa: BLE001
-            # 快批只是抢时间的，挂了不算失败 —— 慢批照样会给出完整地图
-            log.warning("快批概念失败（%s）：%s", topic, exc)
-        finally:
-            await queue.put({"event": "_end", "data": {"who": "quick"}})
-
-    async def deep() -> None:
-        try:
-            await _deep_batch(user=user, topic=topic, extra=extra, quota=quota, out=queue)
-        except Exception as exc:  # noqa: BLE001
-            log.warning("概念地图流式生成失败（%s）：%s", topic, exc)
-            failed.append(str(exc)[:300])
-        finally:
-            await queue.put({"event": "_end", "data": {"who": "deep"}})
-
-    tasks = [asyncio.create_task(quick()), asyncio.create_task(deep())]
-    pending_ends = 2
     try:
-        while pending_ends:
-            ev = await queue.get()
-            if ev["event"] == "_end":
-                pending_ends -= 1
+        async for chunk in stream_chat(
+            [
+                Message(role="system", content=prompts.CALIBRATE_SYSTEM),
+                Message(role="user", content=prompts.calibrate_user(topic, extra)),
+            ],
+            scene="calibrate",
+            tier=TIER_SMALL,  # ★ 枚举任务，不需要推理模型（见上面的说明）
+            user_id=user.id,
+            temperature=0.3,  # 概念地图要稳定可缓存，不需要创造力
+            # 全套 15 条 name+gloss+probe 约两三千 token；给到 6000 留足余量，
+            # 万一模型仍吐思维链也不会把正文挤没（那个坑踩过两次）
+            max_tokens=6000,
+            json_mode=True,
+            quota=quota,
+        ):
+            if chunk.done:
+                break
+            if chunk.reasoning:
+                if pending := think.add(chunk.reasoning):
+                    yield pending
                 continue
-            if ev["event"] == "_concept":
-                if sent >= CONCEPT_LIMIT:
-                    continue
-                if shaped := _shape_concept(ev["data"], already, seen):
-                    sent += 1
-                    # idx 由这里统一发号，两批混在一起也不会重号
-                    yield {"event": "concept", "data": {**shaped, "idx": sent}}
+            if pending := think.flush():  # 开始吐 JSON 了，思考阶段收尾
+                yield pending
+            if not chunk.delta:
                 continue
-            yield ev
-    finally:
-        # 客户端断开时这个生成器会被 close，两个任务必须跟着收掉，
-        # 否则它们会继续往一个没人读的队列里塞，直到 SSE 超时
-        for t in tasks:
-            t.cancel()
+            buf.append(chunk.delta)
 
+            # total 是第一个键，尽早让前端说出「共几道」
+            if not total_sent and (m := _TOTAL_PROBE.search("".join(buf))):
+                total_sent = True
+                yield {"event": "total", "data": {"total": min(int(m.group(1)), CONCEPT_LIMIT)}}
+
+            for raw in objects.feed(chunk.delta):
+                if sent >= CONCEPT_LIMIT:
+                    break
+                if shaped := _shape_concept(raw, already, seen):
+                    sent += 1
+                    yield {"event": "concept", "data": {**shaped, "idx": sent}}
+    except Exception as exc:  # noqa: BLE001
+        log.warning("概念地图生成失败（%s）：%s", topic, exc)
+        failed = str(exc)[:300]
+
+    # 目标候选与缓存靠整体解析收尾。中途断了也要尽力从残缺输出里救出来 ——
+    # 已经问出去的那几道不该白费
+    goals: list[dict] = []
+    try:
+        try:
+            data = extract_json("".join(buf))
+        except ValueError:
+            repaired = repair_truncated_json("".join(buf))
+            data = json.loads(repaired) if repaired else {}
+        goals = _shape_goals((data or {}).get("goals"))
+        # 完整才写缓存，免得把半截地图存下来喂给下一个人
+        if not failed and isinstance(data, dict) and data.get("concepts") and goals:
+            await cache_put(
+                _map_key(topic, extra), "calibrate", "stream", json.dumps(data, ensure_ascii=False)
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("概念地图收尾解析失败（目标候选可能缺失）：%s", exc)
+
+    yield {"event": "goals", "data": {"goals": goals}}
     if failed:
-        yield {"event": "error", "data": {"message": failed[0]}}
+        yield {"event": "error", "data": {"message": failed}}
     # 失败也要给 done —— 前端据此走降级路，绝不卡在转圈上
     yield {"event": "done", "data": {"count": sent, "failed": bool(failed)}}
 
