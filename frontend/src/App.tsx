@@ -11,6 +11,7 @@ import { Spinner } from './components/ui'
 import LoginPage from './pages/Login'
 import GuidePage from './pages/Guide'
 import HomePage from './pages/Home'
+import CalibratePage from './pages/Calibrate'
 import CoursePage from './pages/Course'
 import SectionPage from './pages/Section'
 import DocumentsPage from './pages/Documents'
@@ -107,6 +108,9 @@ export default function App() {
                     <Page>
                       <Routes>
                         <Route path="/" element={<HomePage />} />
+                        {/* 开课前的边界校准（取代难度等级）。单独一条路由，
+                            这样浏览器返回键能回到主题输入，不会丢上下文 */}
+                        <Route path="/new" element={<CalibratePage />} />
                         <Route path="/courses/:courseId" element={<CoursePage />} />
                         <Route
                           path="/courses/:courseId/sections/:sectionId"

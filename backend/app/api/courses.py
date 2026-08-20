@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -12,7 +13,7 @@ from app.api.deps import CurrentUser, Scope, user_quota
 from app.api.sse import sse_response
 from app.core.scope import UserScope
 from app.core.types import new_id, utcnow
-from app.models.card import Card, STATE_ARCHIVED
+from app.models.card import STATE_ARCHIVED, Card
 from app.models.course import (
     COURSE_DRAFT,
     COURSE_OUTLINING,
@@ -22,8 +23,11 @@ from app.models.course import (
     Course,
     Section,
 )
+from app.services import calibrate
 from app.services import course as svc
 from app.services.runstream import cancel_run, outline_key, section_key, stream_run
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/courses", tags=["courses"])
 
@@ -31,10 +35,38 @@ router = APIRouter(prefix="/courses", tags=["courses"])
 # ─────────────────────────────────────────────────────────────
 # Schemas
 # ─────────────────────────────────────────────────────────────
+class CalibrateIn(BaseModel):
+    topic: str = Field(min_length=2, max_length=200)
+    extra: str = Field(default="", max_length=1000)
+
+
+class ConceptStateIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    state: str = Field(pattern="^(known|shaky|unknown)$")
+
+
+class ProbeAnswerIn(BaseModel):
+    concept: str = Field(max_length=80)
+    question: str = Field(default="", max_length=300)
+    answer: str = Field(default="", max_length=1000)
+
+
+class CalibrationIn(BaseModel):
+    """建课时带上的学习边界。整块可以缺省 —— 用户永远有权跳过校准。"""
+
+    concepts: list[ConceptStateIn] = Field(default_factory=list, max_length=40)
+    goal: str = Field(default="", max_length=200)
+    goal_kind: str = Field(default="", max_length=40)
+    # 开放校验题的回答。空着就等于跳过，按自评走
+    probes: list[ProbeAnswerIn] = Field(default_factory=list, max_length=4)
+
+
 class CreateCourseIn(BaseModel):
     topic: str = Field(min_length=2, max_length=200)
+    # level 只在跳过校准时还起作用；有 calibration 时由边界反推
     level: str = Field(default="intermediate", pattern="^(beginner|intermediate|advanced)$")
     extra: str = Field(default="", max_length=1000)
+    calibration: CalibrationIn | None = None
 
 
 class SectionOut(BaseModel):
@@ -72,6 +104,10 @@ class CourseOut(BaseModel):
     stats: dict = {}
     # AI 联网检索后推荐的参考资料（已做过 url 白名单校验）
     resources: list[Any] = []
+    # 学习边界（known / shaky / unknown / goal）。老课程是空对象
+    boundary: dict = {}
+    # 大纲没铺到的「未掌握」概念。有缺口就让用户自己决定要不要重生成
+    coverage_gap: list[str] = []
 
 
 class UpdateSectionIn(BaseModel):
@@ -134,6 +170,8 @@ async def _course_full(scope: Scope, c: Course) -> CourseOut:
         **_course_brief(c),
         chapters=chapters,
         resources=list(c.resources or []),
+        boundary=calibrate.as_any(c.boundary),
+        coverage_gap=[str(x) for x in ((c.meta or {}).get("coverage_gap") or [])],
         stats={
             "sections": total,
             "completed": done,
@@ -182,22 +220,71 @@ async def list_courses(scope: Scope, limit: int = Query(50, le=200)) -> list[dic
     return out
 
 
+@router.post("/calibrate")
+async def calibrate_topic(body: CalibrateIn, scope: Scope, user: CurrentUser) -> dict:
+    """开课前的边界校准：给出这个主题的概念地图与目标候选。
+
+    ★ 这一步取代了「入门 / 进阶 / 深入」。理由见 services/calibrate.py：
+      等级是个谁也答不准的问题，而且模型也无从执行「深入」。
+
+    失败绝不能挡住建课 —— 那是这个产品最珍贵的一秒。所以出错时返回空地图，
+    前端直接走「跳过校准」的路。
+    """
+    try:
+        data = await calibrate.concept_map(
+            user=user, topic=body.topic.strip(), extra=body.extra.strip(),
+            quota=user_quota(user),
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("概念地图生成失败（%s）：%s", body.topic, exc)
+        return {"concepts": [], "goals": [], "degraded": True}
+    return {**data, "degraded": not data["concepts"]}
+
+
 @router.post("", status_code=status.HTTP_201_CREATED)
-async def create_course(body: CreateCourseIn, scope: Scope) -> dict:
+async def create_course(body: CreateCourseIn, scope: Scope, user: CurrentUser) -> dict:
     """建课。**立即返回**，大纲由随后的 SSE 端点流式生成。
 
     旗舰模型设计一门课的大纲要两分钟以上，同步等 = 白屏两分半 = 必然流失。
     所以这里只落一条 outlining 状态的记录，前端拿到 id 就能进页面等，
     等待过程中逐章看到大纲长出来。
+
+    唯一的例外是自评抽查（一次几百 token 的小调用，约两秒）：它必须在大纲
+    开跑**之前**定下来，否则边界还没确定，大纲已经按错误的起点写下去了。
     """
+    boundary: dict = {}
+    level = body.level
+    cal = body.calibration
+    if cal and cal.concepts:
+        # 归一化后再入桶：Softmax / softmax / " softmax " 是同一个概念
+        states = {calibrate.norm(c.name): c.state for c in cal.concepts}
+        names = {calibrate.norm(c.name): c.name.strip() for c in cal.concepts}
+        verdict = await calibrate.verify_claims(
+            user=user,
+            items=[p.model_dump() for p in cal.probes],
+            quota=user_quota(user),
+        )
+        boundary = calibrate.build_boundary(
+            states,
+            names=names,
+            goal=cal.goal,
+            goal_kind=cal.goal_kind,
+            demoted=verdict["demoted"],
+        )
+        # level 只留给旧展示用，方向单向：边界 → level
+        level = calibrate.derive_level(boundary)
+        # 复利：勾了「熟悉」的进用户的已知边界，下一门课不用再勾一遍
+        calibrate.learn(user, boundary["known"])
+
     course = Course(
         id=new_id(),
         user_id=scope.user_id,
         topic=body.topic.strip(),
         title=body.topic.strip(),
-        level=body.level,
+        level=level,
         status=COURSE_OUTLINING,
         meta={"extra": body.extra.strip()} if body.extra.strip() else {},
+        boundary=boundary,
     )
     scope.add(course)
     await scope.commit()
@@ -352,11 +439,19 @@ async def update_section(
 
 
 @router.post("/{course_id}/sections/{section_id}/complete")
-async def complete_section(course_id: str, section_id: str, scope: Scope) -> dict:
+async def complete_section(
+    course_id: str, section_id: str, scope: Scope, user: CurrentUser
+) -> dict:
     section = await scope.require_section(section_id)
     section.completed_at = None if section.completed_at else utcnow()
+    learned = 0
+    if section.completed_at:
+        # ★ 边界的自然演进：学完一节，这节的核心概念进入已知边界，
+        #   下一门课就不会再从头讲它。取消勾选不回退 —— 学过就是学过，
+        #   真忘了会由「划词追问命中它」这个更强的信号把它撤下来（calibrate.forget）
+        learned = calibrate.learn(user, [str(k) for k in (section.key_concepts or [])])
     await scope.commit()
-    return {"completed": section.completed_at is not None}
+    return {"completed": section.completed_at is not None, "learned": learned}
 
 
 @router.get("/meta/suggestions")

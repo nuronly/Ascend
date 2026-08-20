@@ -49,8 +49,22 @@ class Course(Base, TimestampMixin):
     # 状态机：draft-刚健 → outlining大纲生成中 → ready 大纲就绪/ failed 生成失败/ archived软删除）
     status: Mapped[str] = mapped_column(String(20), default=COURSE_DRAFT, nullable=False)
     # 难度等级，三选一：beginner / intermediate / advanced。
-    # 生成时经 prompts.LEVEL_HINT 映射成一句中文难度描述（如「面向零基础读者，多用类比」），
+    # ★ 已降级为**派生字段**，只用于列表展示与历史课程兼容，不再驱动生成。
+    #   原因：「入门/进阶/深入」是相对于主题的绝对刻度，而学习真正的约束是
+    #   「你已知的边缘在哪」—— 写了十年 Java 的人和数学系学生学同一个主题都
+    #   算 beginner，但两人的起点毫无共同之处。模型也无从执行「深入」，它只能
+    #   理解成多写公式多写术语。真正可执行的约束在 boundary 里。
+    #   新课的 level 由 boundary 的未知占比反推（calibrate.derive_level）。
     level: Mapped[str] = mapped_column(String(20), default="intermediate", nullable=False)
+    # ★ 学习边界（学习契约）。取代 level 成为生成的真实约束：
+    #   {"known": [...],    直接引用，不铺垫
+    #    "shaky": [...],    一句话回顾后即可使用
+    #    "unknown": [...],  每个都必须有独立小节铺垫
+    #    "goal": "学完之后能做什么",  决定课程的**上界**
+    #    "goal_kind": "read_paper | build | explain | …"}
+    #   把形容词约束换成集合约束 —— 模型不必揣摩「深」是什么意思，
+    #   而且大纲出来后能机械检查「unknown 是否都被铺到」（超纲/漏铺可验证）。
+    boundary: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
     # 大纲生成失败时的错误信息，成功后置回 None；配合 status=failed 展示给用户
     error: Mapped[str | None] = mapped_column(Text)
     # 杂项扩展字段（JSON）。目前存建课时的 extra 附加要求，如 {"extra": "偏重工程实现"}

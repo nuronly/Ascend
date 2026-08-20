@@ -32,7 +32,7 @@ from app.models.course import (
     Course,
     Section,
 )
-from app.services import prompts
+from app.services import calibrate, prompts
 
 log = logging.getLogger(__name__)
 
@@ -197,7 +197,10 @@ async def stream_outline(
         Message(
             role="user",
             content=prompts.outline_user(
-                course.topic, course.level, (course.meta or {}).get("extra", "")
+                course.topic,
+                course.level,
+                (course.meta or {}).get("extra", ""),
+                boundary=calibrate.as_any(course.boundary),
             ),
         ),
     ]
@@ -298,7 +301,10 @@ async def generate_outline(
                 Message(
                     role="user",
                     content=prompts.outline_user(
-                        course.topic, course.level, (course.meta or {}).get("extra", "")
+                        course.topic,
+                        course.level,
+                        (course.meta or {}).get("extra", ""),
+                        boundary=calibrate.as_any(course.boundary),
                     ),
                 ),
             ],
@@ -400,6 +406,22 @@ async def _persist_outline(
     if dropped:
         log.info("剪掉 %d 条无效依赖（指向不存在的小节、自身，或排在后面的小节）", dropped)
 
+    # ── 边界覆盖率自检 ──
+    # ★ 这是把 level 换成集合约束换来的直接好处：约束可验证。
+    #   「这份大纲够不够深入」无法机械检查，但「他说不会的这 6 个词是不是
+    #   每个都有地方讲」完全可以。漏了就记下来，让用户自己决定要不要重生成 ——
+    #   悄悄交付一份缺口大纲，他会一路学到某节才发现看不懂。
+    if gap := calibrate.coverage_gap(
+        calibrate.as_any(course.boundary),
+        [f"{s.title} {s.summary} {' '.join(str(k) for k in (s.key_concepts or []))}" for s in order],
+    ):
+        log.warning("大纲漏掉了 %d 个学习者未掌握的概念：%s", len(gap), "、".join(gap))
+        course.meta = {**(course.meta or {}), "coverage_gap": gap}
+    elif (course.meta or {}).get("coverage_gap"):
+        meta = dict(course.meta or {})
+        meta.pop("coverage_gap", None)  # 重生成补齐了，别留着旧警告
+        course.meta = meta
+
     course.status = COURSE_READY
     course.error = None
     await scope.commit()
@@ -466,6 +488,9 @@ async def stream_section_content(
         prev_titles=prev,
         key_concepts=list(section.key_concepts or []),
         adjust=prompts.ADJUST_HINT.get(adjust, adjust),
+        # 正文这层最容易翻车的两件事：把他已经会的又讲一遍、假定他会某个
+        # 其实没接触过的词。边界能同时挡住两头
+        boundary=calibrate.as_any(course.boundary),
     )
 
     yield {"event": "start", "data": {"section_id": section.id, "title": section.title}}

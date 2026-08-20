@@ -11,11 +11,142 @@ from __future__ import annotations
 
 import json
 
+# ★ 已降级为**兜底**：只在课程没有学习边界（老课程、或用户跳过了校准）时使用。
+#   为什么不再作为主约束：「深入」对模型不可执行 —— 它只能理解成多写公式、
+#   多写术语，于是 advanced 的产出往往是同样的内容加更多黑话。而「入门」
+#   对用户也不可自评：写了十年 Java 的人学 Transformer 算入门吗？
+#   可执行的约束是集合（哪些词能直接用、哪些必须先铺），见 boundary_block。
 LEVEL_HINT = {
     "beginner": "面向零基础读者，多用类比和生活化例子，术语首次出现时必须解释。",
     "intermediate": "面向有一定基础的读者，可直接使用领域常见术语，重点讲清机制与取舍。",
     "advanced": "面向进阶读者，可深入数学推导、实现细节与前沿争议，不必解释基础术语。",
 }
+
+
+# ─────────────────────────────────────────────────────────────
+# 学习边界（校准）
+# ─────────────────────────────────────────────────────────────
+CALIBRATE_SYSTEM = """你在帮学习平台确定一位学习者的「已知边界」。
+
+平台不再问学习者「你是入门还是进阶」—— 那个问题谁也答不准：写了十年后端的
+人学 Transformer 该选哪个？所以改成让他**勾出自己熟悉哪些概念**，据此决定
+课程从哪句话讲起、哪些必须先铺垫。
+
+你的任务：给出这个主题的概念地图，供学习者三态勾选（熟悉 / 听过 / 没接触）。
+
+概念的选取（12~16 个，不要更多 —— 勾选是要在 30 秒内完成的）：
+- depth=1：**外围基础**。学这个主题需要的通识底子（如数学、编程基本功）。
+- depth=2：**直接前置**。不先懂它就看不懂这个主题的核心机制。
+- depth=3：**主题内核心**。这门课本身要教的东西。
+  它的作用是探到天花板：如果学习者把 depth=3 全勾了「熟悉」，说明这门课
+  对他太浅，平台会改而建议一个更前沿的切入点。
+三档大致各占三分之一。
+
+每个概念给三样东西：
+- name：概念名。**用最通用的叫法**，中文领域惯用英文的就用英文（如 softmax、
+  Transformer）。不要生造译名 —— 学习者认不出名字会误判成「没接触」。
+- gloss：一句话人话解释（≤ 22 字），让人只看这句就能判断自己是否真的知道它。
+- probe：一个开放式校验问题，用来验证「熟悉」这个自评是否属实。
+  · 必须考**理解**而不是记忆：问关系、问取舍、问为什么，不要问定义或公式默写。
+  · 一两句话能答完。
+  · 反例（不要这样问）：「注意力的公式是什么」。
+    正例：「为什么注意力里要除以根号 d？」
+
+同时给 3~4 个**学习目标**候选（goals）。它决定课程的上界，比难度等级有用得多：
+同一个主题，「能读懂论文公式」和「能自己写一个实现」应该是两份完全不同的大纲。
+- kind 从 read_paper / build / explain / apply / research 里选，彼此不要重复。
+- label 是给人看的一句话（≤ 18 字），具体到能想象出画面。
+
+只输出 JSON：
+{
+  "concepts": [
+    {"name": "softmax", "gloss": "把一组数变成和为一的概率", "depth": 2,
+     "probe": "为什么它对最大值敏感？"}
+  ],
+  "goals": [
+    {"kind": "read_paper", "label": "能读懂原论文的公式部分"}
+  ]
+}"""
+
+
+def calibrate_user(topic: str, extra: str = "") -> str:
+    parts = [f"主题：{topic}"]
+    if extra.strip():
+        parts.append(f"学习者补充说明：{extra.strip()}")
+    parts.append("请给出这个主题的概念地图与学习目标候选。")
+    return "\n".join(parts)
+
+
+VERIFY_SYSTEM = """你在核对学习者的自评是否属实。
+
+学习者勾选了「熟悉」某些概念，平台随即问了他一两个开放问题。你要判断他的
+回答是否表明他**真的能用**这个概念。
+
+判定尺度：
+- 宽容对待表达：口语化、不完整、用自己的话打比方，只要方向对就算通过。
+  这不是考试，我们不在乎术语说得漂不漂亮。
+- 严格对待方向：说反了、混淆了两个概念、或者只是把问题重复一遍、
+  空泛到没有信息量（「就是一种优化方法」），都算没通过。
+- ★ 拿不准的时候判**没通过**。这个判定只用于「要不要先带他回顾一下」：
+  多回顾一句最多啰嗦，少回顾一句他会直接看不懂后面全部内容 —— 两种错误的
+  代价差一个数量级。
+
+只输出 JSON：{"results": [{"concept": "概念名", "pass": true, "note": "≤20字的理由"}]}"""
+
+
+def verify_user(items: list[dict]) -> str:
+    lines = ["请判断以下回答："]
+    for i, it in enumerate(items, 1):
+        lines.append(
+            f"{i}. 概念：{it.get('concept', '')}\n"
+            f"   问题：{it.get('question', '')}\n"
+            f"   回答：{it.get('answer', '')}"
+        )
+    return "\n".join(lines)
+
+
+def boundary_block(boundary: dict, *, brief: bool = False) -> str:
+    """把学习边界渲染成 prompt 里的硬约束。
+
+    ★ 这是 level 的替代品，也是整套设计的关键：约束从形容词（「讲深一点」，
+      模型只能揣摩）变成集合（「这些词直接用、这些词必须先讲」，可执行、
+      而且事后能机械检查有没有做到）。
+
+    brief=True 给小节正文用：那里不需要 unknown 全表（本节该讲什么已经写在
+    key_concepts 里了），只需要知道哪些词可以直接用。
+    """
+    known = [str(x) for x in (boundary.get("known") or [])][:40]
+    shaky = [str(x) for x in (boundary.get("shaky") or [])][:40]
+    unknown = [str(x) for x in (boundary.get("unknown") or [])][:40]
+    goal = str(boundary.get("goal") or "").strip()
+
+    if not (known or shaky or unknown or goal):
+        return ""
+
+    parts = ["【学习者的已知边界 —— 这是本次生成最重要的约束】"]
+    if known:
+        parts.append(
+            f"已掌握（**直接使用，不要解释、不要单独开一节讲**）：{'、'.join(known)}"
+        )
+    if shaky:
+        parts.append(f"半懂（用一句话回顾一下即可继续，不要展开成一节）：{'、'.join(shaky)}")
+    if unknown and not brief:
+        parts.append(
+            f"未掌握（**每一个都必须有对应的小节把它讲清楚**，不能假定他已经会）："
+            f"{'、'.join(unknown)}"
+        )
+    if goal:
+        parts.append(
+            f"学完之后他想能够：{goal}\n"
+            "课程的终点必须刚好够到这个目标：不要为了完整而铺陈他不需要的分支，"
+            "也不要在离目标还差一步的地方停下。"
+        )
+    if known and not brief:
+        parts.append(
+            "★ 起点要贴着他的边界，不要从零起跑。把他已经会的东西再讲一遍，"
+            "是最容易让人放弃这门课的做法。"
+        )
+    return "\n".join(parts)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -91,11 +222,15 @@ OUTLINE_SYSTEM = """你是一位擅长设计学习路径的课程架构师。
 }"""
 
 
-def outline_user(topic: str, level: str, extra: str = "") -> str:
-    parts = [
-        f"主题：{topic}",
-        f"难度定位：{LEVEL_HINT.get(level, LEVEL_HINT['intermediate'])}",
-    ]
+def outline_user(
+    topic: str, level: str, extra: str = "", boundary: dict | None = None
+) -> str:
+    parts = [f"主题：{topic}"]
+    # 有边界就用边界；没有（老课程 / 用户跳过了校准）才退回难度形容词
+    if block := boundary_block(boundary or {}):
+        parts.append(block)
+    else:
+        parts.append(f"难度定位：{LEVEL_HINT.get(level, LEVEL_HINT['intermediate'])}")
     if extra.strip():
         parts.append(f"学习者补充说明：{extra.strip()}")
     parts.append("请设计这门课的大纲。")
@@ -138,6 +273,7 @@ def section_user(
     prev_titles: list[str],
     key_concepts: list[str],
     adjust: str = "",
+    boundary: dict | None = None,
 ) -> str:
     parts = [
         f"课程：{course_title}",
@@ -151,7 +287,12 @@ def section_user(
     if prev_titles:
         # 只给标题不给正文：让模型知道讲过什么以避免重复，同时控制上下文成本
         parts.append(f"学习者已学过的小节（不要重复讲）：{'；'.join(prev_titles[-12:])}")
-    parts.append(f"难度定位：{LEVEL_HINT.get(level, LEVEL_HINT['intermediate'])}")
+    # 正文这一层最容易翻车的是「把他已经会的东西又讲一遍」和「假定他会某个
+    # 他其实没接触过的词」。边界能同时挡住这两头，比难度形容词精确得多
+    if block := boundary_block(boundary or {}, brief=True):
+        parts.append(block)
+    else:
+        parts.append(f"难度定位：{LEVEL_HINT.get(level, LEVEL_HINT['intermediate'])}")
     if adjust:
         parts.append(f"\n【本次重写的特别要求】{adjust}")
     parts.append("\n请写出本节正文。")

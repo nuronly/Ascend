@@ -55,6 +55,46 @@ export interface ChapterBrief {
   sections: SectionBrief[]
 }
 
+/* ── 学习边界（取代难度等级）──
+   「入门 / 进阶 / 深入」是个谁也答不准的问题：写了十年后端的人学
+   Transformer 该选哪个？而且「深入」对模型也不可执行 —— 它只会多写公式。
+   所以换成三个集合：哪些词可以直接用、哪些要回顾一句、哪些必须从头讲。 */
+export type ConceptState = 'known' | 'shaky' | 'unknown'
+
+export interface CalibrateConcept {
+  name: string
+  /** 一句话人话解释 —— 认不出名字的人会误判成「没接触」 */
+  gloss: string
+  /** 1=外围基础 2=直接前置 3=主题内核心 */
+  depth: 1 | 2 | 3
+  /** 开放校验问题，只对最深档的「熟悉」抽查 */
+  probe: string
+  /** 命中用户已知边界时预勾成 known —— 学过的不该再问一遍 */
+  preset: '' | 'known'
+}
+
+export interface CalibrateGoal {
+  kind: string
+  label: string
+}
+
+export interface Boundary {
+  known?: string[]
+  shaky?: string[]
+  unknown?: string[]
+  goal?: string
+  goal_kind?: string
+  /** 抽查没过、被从「熟悉」降到「半懂」的概念 */
+  demoted?: string[]
+  calibrated_at?: string
+}
+
+export const CONCEPT_STATE_LABEL: Record<ConceptState, string> = {
+  known: '熟悉',
+  shaky: '听过',
+  unknown: '没接触',
+}
+
 export interface Course {
   id: string
   topic: string
@@ -67,6 +107,9 @@ export interface Course {
   chapters: ChapterBrief[]
   stats: { sections?: number; completed?: number; cards?: number }
   resources?: Resource[]
+  boundary?: Boundary
+  /** 大纲没铺到的「未掌握」概念。集合约束才能这样机械校验 */
+  coverage_gap?: string[]
 }
 
 export interface SectionDetail {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -25,7 +26,10 @@ from app.models.card import (
     CardLink,
     CardMessage,
 )
+from app.services import calibrate
 from app.services import card as svc
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/cards", tags=["cards"])
 
@@ -230,7 +234,7 @@ async def get_card(card_id: str, scope: Scope) -> dict:
 # 建卡与问答
 # ─────────────────────────────────────────────────────────────
 @router.post("", status_code=status.HTTP_201_CREATED)
-async def create_card(body: CreateCardIn, scope: Scope) -> dict:
+async def create_card(body: CreateCardIn, scope: Scope, user: CurrentUser) -> dict:
     if body.origin in (ORIGIN_PARENT_ANSWER, ORIGIN_PARENT_NOTE) and not body.parent_card_id:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "从卡片内划词必须指定 parent_card_id")
     if body.origin == ORIGIN_SOURCE_TEXT and not (
@@ -261,6 +265,13 @@ async def create_card(body: CreateCardIn, scope: Scope) -> dict:
         origin_message_id=body.origin_message_id,
         origin_offset=body.origin_offset,
     )
+
+    # ★ 边界的反向信号：他在一个自称「已掌握」的概念上划词提问了，
+    #   说明那个「熟悉」是虚的。行为信号强于自评，直接把它撤出已知边界，
+    #   下一门课会重新给他铺。这里只做纯字符串匹配，不额外调模型
+    if forgotten := calibrate.forget(user, body.selected_text):
+        await scope.commit()
+        log.info("已知边界撤回 %d 个概念（划词追问命中）：%s", len(forgotten), "、".join(forgotten))
 
     d = card_dict(card)
     # 链深提示：从卡片反向驱动课程生成的闭环入口（PLAN §1.4 / §3.2.0）

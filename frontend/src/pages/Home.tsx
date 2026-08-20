@@ -1,22 +1,19 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { api } from '@/lib/api'
 import { useAuth, toast } from '@/lib/store'
 import type { Course, VaultOverview } from '@/lib/types'
+// level 已降级为「由学习边界反推」的派生值，这里只当一个粗略的深浅标签用
 import { LEVEL_LABELS } from '@/lib/types'
-import { Button, Empty, Input, Progress, Segmented, Spinner } from '@/components/ui'
+import { Button, Empty, Input, Progress, Spinner } from '@/components/ui'
 import { cn, relativeTime } from '@/lib/utils'
-
-type Level = 'beginner' | 'intermediate' | 'advanced'
 
 export default function HomePage() {
   const nav = useNavigate()
-  const qc = useQueryClient()
   const user = useAuth((s) => s.user)
 
   const [topic, setTopic] = useState('')
-  const [level, setLevel] = useState<Level>('intermediate')
   const [extra, setExtra] = useState('')
   const [showExtra, setShowExtra] = useState(false)
 
@@ -36,24 +33,16 @@ export default function HomePage() {
     staleTime: 10 * 60_000,
   })
 
-  const create = useMutation({
-    mutationFn: (body: { topic: string; level: Level; extra: string }) =>
-      api.post<Course>('/courses', body),
-    onSuccess: (c) => {
-      qc.invalidateQueries({ queryKey: ['courses'] })
-      // 大纲生成放在课程页里流式做，这里立刻跳转，用户能看到进度
-      nav(`/courses/${c.id}`)
-    },
-    onError: (e: any) => toast.error(e?.message ?? '建课失败'),
-  })
-
+  /** 先去划边界，再建课 —— 难度等级已废除，理由见 pages/Calibrate.tsx */
   const start = () => {
     const t = topic.trim()
     if (t.length < 2) {
       toast.error('主题太短了，说具体一点')
       return
     }
-    create.mutate({ topic: t, level, extra: extra.trim() })
+    const qs = new URLSearchParams({ topic: t })
+    if (extra.trim()) qs.set('extra', extra.trim())
+    nav(`/new?${qs}`)
   }
 
   const rate = overview?.rewrite_rate ?? 0
@@ -66,7 +55,8 @@ export default function HomePage() {
           想学点什么，{user?.name}？
         </h1>
         <p className="text-[13.5px] text-[var(--text-muted)] mt-2 leading-relaxed">
-          说一个主题，我先给你一份大纲。正文按需生成 —— 点进哪一节才写哪一节。
+          说一个主题，我先问你几个问题弄清你的底子，再给你一份贴着你边界的大纲。
+          正文按需生成 —— 点进哪一节才写哪一节。
         </p>
 
         <div className="mt-6">
@@ -74,32 +64,19 @@ export default function HomePage() {
             <Input
               value={topic}
               onChange={(e) => setTopic(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && !create.isPending && start()}
+              onKeyDown={(e) => e.key === 'Enter' && start()}
               placeholder="比如：Transformer 注意力机制、拜占庭将军问题、宋代文官制度…"
               className="h-10 text-[14px]"
-              disabled={create.isPending}
             />
-            <Button
-              variant="primary"
-              size="md"
-              onClick={start}
-              loading={create.isPending}
-              className="h-10 px-5 shrink-0"
-            >
+            <Button variant="primary" size="md" onClick={start} className="h-10 px-5 shrink-0">
               开课
             </Button>
           </div>
 
           <div className="flex items-center gap-3 mt-3">
-            <Segmented
-              value={level}
-              onChange={setLevel}
-              options={[
-                { value: 'beginner', label: '入门', title: '零基础，多类比' },
-                { value: 'intermediate', label: '进阶', title: '有基础，讲机制与取舍' },
-                { value: 'advanced', label: '深入', title: '推导、实现细节与前沿争议' },
-              ]}
-            />
+            <span className="text-[12px] text-[var(--text-subtle)]">
+              下一步会让你勾一下已经会的东西，约 20 秒
+            </span>
             <button
               onClick={() => setShowExtra((v) => !v)}
               className="text-[12px] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors"

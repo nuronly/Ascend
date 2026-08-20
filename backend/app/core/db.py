@@ -126,6 +126,23 @@ async def _migrate_light(conn) -> None:
                     text(f"ALTER TABLE {table} ADD COLUMN resources TEXT NOT NULL DEFAULT '[]'")
                 )
                 log.info("迁移：%s 表补充 resources 列", table)
+
+        # 学习边界取代 level 驱动生成（见 models/course.py）。
+        # 老课程的 boundary 是空对象 —— 生成时自动回退到 level，不会坏
+        rows = (await conn.execute(text("PRAGMA table_info(courses)"))).all()
+        if "boundary" not in {r[1] for r in rows}:
+            await conn.execute(
+                text("ALTER TABLE courses ADD COLUMN boundary TEXT NOT NULL DEFAULT '{}'")
+            )
+            log.info("迁移：courses 表补充 boundary 列")
+
+        # 跨课继承的已知边界
+        rows = (await conn.execute(text("PRAGMA table_info(users)"))).all()
+        if "known_concepts" not in {r[1] for r in rows}:
+            await conn.execute(
+                text("ALTER TABLE users ADD COLUMN known_concepts TEXT NOT NULL DEFAULT '[]'")
+            )
+            log.info("迁移：users 表补充 known_concepts 列")
     else:  # pragma: no cover
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE")
@@ -136,6 +153,14 @@ async def _migrate_light(conn) -> None:
             await conn.execute(
                 text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS resources JSONB NOT NULL DEFAULT '[]'")
             )
+        await conn.execute(
+            text("ALTER TABLE courses ADD COLUMN IF NOT EXISTS boundary JSONB NOT NULL DEFAULT '{}'")
+        )
+        await conn.execute(
+            text(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS known_concepts JSONB NOT NULL DEFAULT '[]'"
+            )
+        )
 
 
 async def _sqlite_checkpoint() -> None:

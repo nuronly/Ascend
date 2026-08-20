@@ -221,6 +221,45 @@ export default function CoursePage() {
         </div>
       )}
 
+      {/* ── 这门课是按什么边界定制的 ──
+           把它摊出来有两个用处：让用户确认「AI 真的按我说的来了」，
+           以及在他发现自己勾错时能看出问题出在哪（重生成会重新走一遍边界）。*/}
+      {!outlining && !!(course.boundary?.known?.length || course.boundary?.goal) && (
+        <div className="mt-9 p-4 rounded-[var(--radius-lg)] border border-[var(--border)] bg-[var(--bg-sunken)]">
+          <div className="text-[12.5px] font-medium">按你的边界定制</div>
+          {course.boundary?.goal && (
+            <div className="text-[12.5px] text-[var(--text-muted)] mt-1.5 leading-relaxed">
+              目标 · {course.boundary.goal}
+            </div>
+          )}
+          {!!course.boundary?.known?.length && (
+            <BoundaryRow label="不再讲" items={course.boundary.known} />
+          )}
+          {!!course.boundary?.shaky?.length && (
+            <BoundaryRow label="回顾一句" items={course.boundary.shaky} />
+          )}
+          {!!course.boundary?.demoted?.length && (
+            <div className="text-[11.5px] text-[var(--text-subtle)] mt-2 leading-relaxed">
+              其中 {course.boundary.demoted.join('、')} 我会顺手带你回顾 —— 抽查的回答不太确定。
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── 覆盖缺口：集合约束才能这样机械校验 ── */}
+      {!outlining && !!course.coverage_gap?.length && (
+        <div className="mt-6 p-4 rounded-[var(--radius-lg)] border border-[color-mix(in_oklch,var(--accent)_35%,transparent)] bg-[color-mix(in_oklch,var(--accent)_6%,transparent)]">
+          <div className="text-[13px] font-medium">这份大纲漏了几个你说不会的概念</div>
+          <p className="text-[12.5px] text-[var(--text-muted)] mt-1.5 leading-relaxed">
+            {course.coverage_gap.join('、')} 没有对应的小节。
+            要么重新生成一份，要么就这样开始 —— 遇到时可以直接划词追问。
+          </p>
+          <Button size="sm" variant="outline" onClick={retry} className="mt-2.5">
+            重新生成大纲
+          </Button>
+        </div>
+      )}
+
       {/* ── AI 检索到的参考资料 ── */}
       {!!course.resources?.length && (
         <ResourceList items={course.resources} className="mt-9" />
@@ -339,6 +378,26 @@ export default function CoursePage() {
 
       {/* ── 右：课程详情 ── */}
       <div className="grow min-w-0 min-h-0 overflow-y-auto">{detail}</div>
+    </div>
+  )
+}
+
+/** 边界里的一组概念。多了就折起来 —— 这块是给人扫一眼确认的，不是清单 */
+function BoundaryRow({ label, items }: { label: string; items: string[] }) {
+  const shown = items.slice(0, 8)
+  const rest = items.length - shown.length
+  return (
+    <div className="flex items-baseline gap-2 mt-2 flex-wrap">
+      <span className="text-[11px] text-[var(--text-subtle)] shrink-0">{label}</span>
+      {shown.map((k) => (
+        <span
+          key={k}
+          className="text-[11.5px] px-1.5 py-[1px] rounded-[4px] bg-[var(--bg-raised)] border border-[var(--border)] text-[var(--text-muted)]"
+        >
+          {k}
+        </span>
+      ))}
+      {rest > 0 && <span className="text-[11px] text-[var(--text-subtle)]">+{rest}</span>}
     </div>
   )
 }
