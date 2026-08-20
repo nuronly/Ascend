@@ -365,9 +365,19 @@ async def answer_stream(
             "source": (origins.get(c.source_section_id or "") or {}).get("section_title", ""),
             "created_at": c.created_at.strftime("%Y-%m-%d"),
             "is_rewritten": c.is_rewritten,
+            "kind": c.kind,
         }
         for c in picked
     ]
+
+    # ★ 四路召回只是**预热**：给模型一批摘要级候选。
+    #   真要引用某份笔记的原话时，让它自己用 read_note 读当前全文 ——
+    #   笔记是用户反复改的东西，截断片段既可能过时，又恰好砍掉后半的
+    #   「我的理解」「我还没搞懂的」（最值钱的部分）。
+    #   原则：索引用于发现，工具用于引用。
+    from app.llm.tools.memory import memory_tools
+
+    tools = memory_tools(scope)
 
     # 终答用旗舰模型 —— 质量直接决定产品可信度（PLAN §4.1）
     try:
@@ -380,12 +390,29 @@ async def answer_stream(
             tier=TIER_FLAGSHIP,
             user_id=scope.user_id,
             temperature=0.4,
-            max_tokens=2500,
+            max_tokens=6000,  # 带工具的多轮往返，给足额度
             quota=quota,
+            tools=tools,
         ):
             if chunk.done:
                 break
-            yield {"event": "delta", "data": {"text": chunk.delta}}
+            # 正在查什么、查到了什么，实时说出来（与大纲/正文一致的处理）
+            if chunk.tool_event:
+                ev = chunk.tool_event
+                yield {
+                    "event": f"tool_{ev.phase}",
+                    "data": {
+                        "name": ev.name,
+                        "detail": ev.detail,
+                        "items": (ev.payload or {}).get("items", []),
+                        "ms": ev.ms,
+                    },
+                }
+                continue
+            if chunk.reasoning:
+                continue  # 第二大脑不展示思维链，避免和引用列表抢注意力
+            if chunk.delta:
+                yield {"event": "delta", "data": {"text": chunk.delta}}
     except Exception as exc:
         yield {"event": "error", "data": {"message": str(exc)[:400]}}
         return
@@ -455,7 +482,6 @@ async def memory_network(scope: UserScope, limit: int = 800) -> dict:
     父子链与 real link 是突触，FSRS 的 stability 决定它有多亮。
     快遗忘的节点会自然暗下去 —— 用户能**看到**自己正在遗忘什么。
     """
-    from sqlalchemy import or_ as sa_or
 
     from app.models.card import CardLink
     from app.models.learning import ReviewState

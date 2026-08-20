@@ -8,6 +8,7 @@ import { reportGuideStep } from '@/lib/guide'
 import { useIsDark } from '@/lib/useTheme'
 import { Markdown } from '@/components/Markdown'
 import { NeuralNetwork, type NeuralHandle } from '@/components/NeuralNetwork'
+import RunTimeline, { type ToolStep } from '@/components/RunTimeline'
 import { Badge, Button, Modal, Segmented, Spinner, Textarea } from '@/components/ui'
 import { cn, relativeTime, truncate } from '@/lib/utils'
 
@@ -35,6 +36,14 @@ const RECALL_LABEL: Record<string, { text: string; color: string }> = {
   fused: { text: '融合排序', color: '#c9d4ea' },
 }
 
+/** 记忆工具的人话名字。「它查了什么」是可解释性的核心，不该只显示函数名 */
+const MEMORY_TOOL_LABEL: Record<string, string> = {
+  search_memory: '再查一遍我的记录',
+  read_note: '读我那一节的笔记全文',
+  read_outline: '查这门课的大纲与前置依赖',
+  my_boundary: '看我的已知边界',
+}
+
 /** 画布上的浮层。之前写死成黑色药丸，浅底下像贴了块补丁 */
 const FLOAT = cn(
   'absolute px-2.5 py-1.5 rounded-full',
@@ -51,6 +60,8 @@ export default function BrainPage() {
   const [status, setStatus] = useState('')
   const [detail, setDetail] = useState<Card | null>(null)
   const [stage, setStage] = useState<{ key: string; count: number } | null>(null)
+  // 记忆工具的调用过程：它去读了哪份笔记、查了哪门课的大纲
+  const [tools, setTools] = useState<ToolStep[]>([])
   const [timeline, setTimeline] = useState(1)
   const [playing, setPlaying] = useState(false)
   const [view, setView] = useState<'split' | 'net' | 'chat'>('split')
@@ -101,6 +112,7 @@ export default function BrainPage() {
     setInput('')
     setBusy(true)
     setStatus('正在检索你的学习记录…')
+    setTools([])
     netRef.current?.reset()
 
     const ctrl = new AbortController()
@@ -127,6 +139,25 @@ export default function BrainPage() {
           } else {
             netRef.current?.activate(ids, data.stage === 'vector' ? 'vector' : 'fulltext', 0.9)
           }
+        }
+
+        // ★ 记忆工具：预检索只给摘要，模型会自己去读笔记全文 / 大纲 / 已知边界。
+        //   把这个过程摆出来 —— 「它查了什么」正是可解释性的核心
+        if (ev === 'tool_call') {
+          setTools((t) => [
+            ...t,
+            { name: data?.name ?? '', query: MEMORY_TOOL_LABEL[data?.name] ?? data?.name ?? '', state: 'running' },
+          ])
+        }
+        if (ev === 'tool_result' || ev === 'tool_error') {
+          const ok = ev === 'tool_result'
+          setTools((t) =>
+            t.map((s, i) =>
+              i === t.length - 1
+                ? { ...s, state: ok ? 'done' : 'error', detail: data?.detail }
+                : s,
+            ),
+          )
         }
 
         if (ev === 'citations') {
@@ -426,6 +457,13 @@ export default function BrainPage() {
                             </div>
                           )}
 
+                          {/* 正在查什么（读笔记全文 / 查大纲 / 看已知边界） */}
+                          {i === turns.length - 1 && busy && !!tools.length && (
+                            <div className="mb-3">
+                              <RunTimeline thinking={0} tools={tools} />
+                            </div>
+                          )}
+
                           {t.content ? (
                             <div className={cn(t.empty && 'text-[var(--text-muted)]')}>
                               <Markdown variant="read" onCitation={openCard}>
@@ -437,7 +475,7 @@ export default function BrainPage() {
                               <Spinner className="size-3.5 text-[var(--accent)]" />
                               {status}
                             </div>
-                          ) : (
+                          ) : tools.length ? null : (
                             <div className="space-y-2">
                               <div className="skeleton h-3.5 w-4/5" />
                               <div className="skeleton h-3.5 w-full" />

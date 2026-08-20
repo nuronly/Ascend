@@ -330,7 +330,24 @@ async def enrich_card(scope: UserScope, card: Card, *, quota: int | None = None)
 
 
 async def index_card(scope: UserScope, card: Card) -> None:
-    """写入检索索引。jieba 分词后再入库（PLAN §3.6）。"""
+    """写入检索索引。jieba 分词后再入库（PLAN §3.6）。
+
+    ★ 索引里必须带上「条件」，不只是内容
+
+      同一个「softmax」，在「注意力」一节问的和在「分类损失」一节问的，
+      是两回事。所以除了问答与己见，还要索引：
+        · context_text —— 划词所在的那句原文
+        · 所属小节与课程标题 —— 这张卡是学什么的时候产生的
+      少了它们，检索只能匹配到词，匹配不到**语境**。
+    """
+    where = ""
+    if card.source_section_id:
+        try:
+            sec, ch, co = await scope.section_course(card.source_section_id)
+            where = f"{co.title or co.topic} / {ch.title} / {sec.title}"
+        except Exception:
+            where = ""  # 课程被删了，卡片还在（source 是 SET NULL）
+
     text = "\n".join(
         filter(
             None,
@@ -340,6 +357,8 @@ async def index_card(scope: UserScope, card: Card) -> None:
                 card.summary,
                 card.ai_answer,
                 card.user_note,
+                card.context_text,  # 划词所在的原文句子 —— 语境
+                where,  # 这张卡是学什么的时候产生的
                 " ".join(card.concept_tags or []),
             ],
         )
