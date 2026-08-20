@@ -275,15 +275,10 @@ async def stream_answer(
     card.ai_answer = text  # 始终保留最新一条回答，供检索与摘要
     await scope.commit()
 
-    # ★ 答完就自动补摘要与索引，不再等用户点「收进仓库」。
-    #   摘要用小模型（几百 token），换来的是每一张卡都能被检索到、能进复习 ——
-    #   而原来那个手动动作的实际效果是「大部分卡永远停在 draft，等于不存在」。
-    #   失败不影响这次问答：卡和回答都已经落库了。
-    try:
-        await enrich_card(scope, card, quota=quota)
-        await index_card(scope, card)
-    except Exception:
-        log.warning("卡片自动索引失败（不影响本次问答）", exc_info=True)
+    # ★ 答完就自动沉淀（摘要 / 索引 / 向量 / 复习排程），不再等用户点「收进仓库」。
+    #   四件事都在 settle_card 里 —— 只有一个入口，才不会像上次那样漏掉后两件
+    #   （那次的后果是向量召回和复习队列对所有新卡静默为空）。
+    await settle_card(scope, card, quota=quota)
 
     yield {
         "event": "done",
@@ -367,12 +362,57 @@ async def index_card(scope: UserScope, card: Card) -> None:
     await scope.commit()
 
 
-async def to_vault(scope: UserScope, card: Card, *, quota: int | None = None) -> Card:
-    """把一张卡（或一份笔记）纳入检索与复习。
+async def settle_card(
+    scope: UserScope, card: Card, *, quota: int | None = None, re_enrich: bool = False
+) -> None:
+    """★ 沉淀：让一张卡（或一份笔记）真正进入检索与复习。
 
-    ★ 对**划词卡**这一步已经自动化：建卡即 state=vault，回答写完自动补索引，
-      用户不必再点「收进仓库」—— 那个动作没人愿意做，也没人理解它在做什么。
-    ★ 对**笔记卡**它仍是用户的一次明确决定（草稿 → 收进笔记），
+    四件事，缺一件就会有一路能力静默消失：
+
+      1. enrich  一句话摘要 + 概念标签（检索难度前移到写入期）
+      2. index   全文索引（jieba → FTS）
+      3. embed   向量（第四路召回的燃料）
+      4. review  FSRS 排程（没有它，这张卡永远不会被推送复习）
+
+    ★ 为什么必须只有一个入口
+
+      这四件事原来分散在 to_vault 与 stream_answer 两处。把「收进仓库」自动化
+      时只搬走了前两件，结果**向量召回与复习队列对所有新卡全空** —— 复习功能
+      整体停摆，而且是静默的（查询不报错，只是永远查不出东西）。
+      两个入口就一定会漂移，所以收成这一个。
+
+    失败一律只记日志：卡和回答早就落库了，沉淀是增强，不该反过来毁掉主流程。
+    """
+    if re_enrich or card.enriched_at is None:
+        # 追问每轮都重抽摘要没必要（一次小模型调用），首轮抽一次就够；
+        # 内容变了由 index/embed 兜住 —— tsv 用的是全文，不是摘要
+        await enrich_card(scope, card, quota=quota)
+
+    try:
+        await index_card(scope, card)
+    except Exception:
+        log.warning("全文索引失败", exc_info=True)
+
+    try:
+        from app.services.brain import embed_card
+
+        await embed_card(scope, card)
+    except Exception:
+        log.warning("向量化失败（其它召回路不受影响）", exc_info=True)
+
+    try:
+        from app.services.review import ensure_review_state
+
+        await ensure_review_state(scope, card)
+    except Exception:
+        log.warning("复习排程建立失败", exc_info=True)
+
+
+async def to_vault(scope: UserScope, card: Card, *, quota: int | None = None) -> Card:
+    """纳入检索与复习，并标记为「用户认过的」。
+
+    ★ 划词卡不再需要它：建卡即 state=vault，回答写完自动 settle。
+    ★ 它现在的用户是**笔记**：草稿 →「收进笔记」是用户的一次明确决定，
       因为「我改完了，这份算数」本来就该由人来说。
     """
     card.state = STATE_VAULT
@@ -381,20 +421,8 @@ async def to_vault(scope: UserScope, card: Card, *, quota: int | None = None) ->
     card.last_touched_at = utcnow()
     await scope.commit()
 
-    await enrich_card(scope, card, quota=quota)
-    await index_card(scope, card)
-
-    # 向量化：第四路召回。失败不影响其它三路，所以整段容错
-    try:
-        from app.services.brain import embed_card
-
-        await embed_card(scope, card)
-    except Exception:
-        log.warning("卡片向量化失败（其它召回路不受影响）", exc_info=True)
-
-    from app.services.review import ensure_review_state
-
-    await ensure_review_state(scope, card)
+    # 用户刚改过内容，所以强制重抽摘要
+    await settle_card(scope, card, quota=quota, re_enrich=True)
     return card
 
 

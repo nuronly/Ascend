@@ -63,5 +63,14 @@ async def network(scope: Scope, limit: int = Query(800, le=3000)) -> dict:
 
 @router.post("/reindex")
 async def reindex(scope: Scope, limit: int = Query(100, le=500)) -> dict:
-    """补齐缺失的向量索引。向量是第四路召回，缺了不影响其它三路。"""
-    return {"embedded": await svc.reindex_missing(scope, limit)}
+    """补齐沉淀：缺失的向量 + 缺失的复习排程。
+
+    向量是唯一有模型成本的一环，所以放在这个显式端点里；排程零成本，
+    复习入口也会自动补（services/review.backfill_review_states）。
+    """
+    from app.services.review import backfill_review_states
+
+    return {
+        "embedded": await svc.reindex_missing(scope, limit),
+        "scheduled": await backfill_review_states(scope),
+    }

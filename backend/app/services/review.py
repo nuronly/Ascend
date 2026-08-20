@@ -67,8 +67,57 @@ async def ensure_review_state(scope: UserScope, card: Card) -> ReviewState:
     return row
 
 
+async def backfill_review_states(scope: UserScope, limit: int = 300) -> int:
+    """给还没有排程的卡片补上初始排程，返回补了几条。
+
+    ★ 为什么需要它
+
+      沉淀链路曾经分散在两处（to_vault / stream_answer），把「收进仓库」自动化
+      时漏掉了排程这一环 —— 后果是**复习队列对所有新卡静默为空**：查询不报错，
+      只是永远查不出东西。链路已经收成一个入口（card.settle_card），但历史数据
+      还缺，而且卡片状态分类取消时又有一批老 draft 卡转正。
+
+      这件事是纯 SQL、零模型成本，所以直接放在复习入口顺手做，
+      用户不必知道有这回事，也不必去点什么「重建索引」。
+    """
+    missing = list(
+        await scope.session.scalars(
+            select(Card.id)
+            .where(
+                Card.user_id == scope.user_id,
+                Card.state == STATE_VAULT,
+                ~select(ReviewState.card_id)
+                .where(ReviewState.card_id == Card.id)
+                .exists(),
+            )
+            .limit(limit)
+        )
+    )
+    if not missing:
+        return 0
+
+    fc = FCard()
+    for cid in missing:
+        scope.add(
+            ReviewState(
+                card_id=cid,
+                user_id=scope.user_id,
+                state=int(fc.state.value),
+                step=fc.step,
+                stability=fc.stability,
+                difficulty=fc.difficulty,
+                due_date=fc.due,
+            )
+        )
+    await scope.commit()
+    log.info("补齐 %d 张卡的复习排程", len(missing))
+    return len(missing)
+
+
 async def due_cards(scope: UserScope, limit: int = 20) -> list[tuple[Card, ReviewState]]:
     """到期待复习的卡。FSRS 排程，到期主动推送（防坟场三件套之一）。"""
+    # 历史遗漏的排程在这里顺手补齐（零成本，见 backfill_review_states）
+    await backfill_review_states(scope)
     rows = await scope.session.execute(
         select(Card, ReviewState)
         .join(ReviewState, ReviewState.card_id == Card.id)

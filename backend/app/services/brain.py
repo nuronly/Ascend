@@ -423,7 +423,12 @@ async def embed_card(scope: UserScope, card: Card) -> bool:
 
 
 async def reindex_missing(scope: UserScope, limit: int = 100) -> int:
-    """批量补齐缺失的向量。可作为维护端点手动触发。"""
+    """批量补齐缺失的向量。
+
+    向量是唯一**有模型成本**的沉淀环节，所以不像复习排程那样在入口自动补，
+    而是留一个显式端点（POST /brain/reindex）。缺了只是少一路召回，
+    其它三路照常工作。
+    """
     rows = await scope.all(
         select(CardSearch)
         .join(Card, Card.id == CardSearch.card_id)
