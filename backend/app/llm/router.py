@@ -408,6 +408,16 @@ async def chat(
                     latency_ms=int((time.perf_counter() - t0) * 1000),
                     success=True, fallback_hop=hop,
                 )
+                # ★ 空产出 + finish_reason=length = 思维链把 max_tokens 吃光了。
+                #   这个坑踩过两次（大纲、概念地图），两次都表现成一句莫名的
+                #   「LLM 返回空内容」，得从头查一遍才知道是预算问题。
+                #   非流式路径原来完全没报过 finish_reason，这里补上：
+                #   下次一眼就知道该加额度，而不是去怀疑 prompt 或网关。
+                if not result.text.strip() and result.finish_reason == "length":
+                    log.warning(
+                        "[%s/%s] %s 零产出：思维链吃光了 max_tokens=%s，调大它",
+                        provider.name, model, scene, max_tokens,
+                    )
                 if ckey and result.text:
                     await cache_put(ckey, scene, model, result.text)
                 return result

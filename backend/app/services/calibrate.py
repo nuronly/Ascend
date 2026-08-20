@@ -85,8 +85,10 @@ async def concept_map(
         tier=TIER_STANDARD,
         user_id=user.id,
         temperature=0.3,  # 概念地图要稳定可缓存，不需要创造力
-        # 推理模型的思维链也吃这份额度，给够 —— 被思维链吃光会零产出
-        max_tokens=8000,
+        # 与大纲一致的 16000：思维链也吃这份额度，而它的长度取决于主题难度 ——
+        # 8000 时「Transformer 注意力机制」就被吃光过一次（零产出后靠重试才救回来，
+        # 等于白烧一次调用）。额度是上限不是消耗，给足没有代价
+        max_tokens=16000,
         use_cache=True,
         quota=quota,
     )
