@@ -43,11 +43,14 @@ export default function NotePanel({
   courseId,
   sectionId,
   completed,
+  justCompleted = false,
 }: {
   courseId: string
   sectionId: string
   /** 学完了才把生成入口变成主按钮 —— 没学完先别急着收 */
   completed: boolean
+  /** 刚点了「标记学完」—— 那是唯一会有人收笔记的时机，要当场邀请 */
+  justCompleted?: boolean
 }) {
   const [note, setNote] = useState<NoteState | null>(null)
   const [loading, setLoading] = useState(true)
@@ -285,6 +288,11 @@ export default function NotePanel({
   if (!note?.exists) {
     return (
       <div className="h-full flex flex-col items-center justify-center px-8 text-center">
+        {justCompleted && (
+          <div className="mb-5 px-3.5 py-2 rounded-[var(--radius)] bg-[color-mix(in_oklch,var(--sem-ok)_10%,transparent)] text-[12.5px] text-[var(--sem-ok)]">
+            这一节标记学完了 —— 趁热收成笔记？
+          </div>
+        )}
         <div className="size-11 rounded-[var(--radius-lg)] border border-dashed border-[var(--border-strong)] grid place-items-center">
           <svg viewBox="0 0 24 24" className="size-5 text-[var(--text-subtle)]" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
             <path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H15l4 4v12.5A1.5 1.5 0 0 1 17.5 21h-11A1.5 1.5 0 0 1 5 19.5v-15Z" />

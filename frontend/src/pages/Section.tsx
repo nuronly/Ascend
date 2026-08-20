@@ -53,6 +53,7 @@ export default function SectionPage() {
   const [narrowDrawer, setNarrowDrawer] = useState(false)
   // 右栏两件事：卡片空间（本节的追问树）/ 笔记卡（这一节的汇流产物）
   const [rightTab, setRightTab] = useState<'cards' | 'note'>('cards')
+  const [justCompleted, setJustCompleted] = useState(false)
 
   const cards = useCardSpace((s) => s.cards)
   const hoverCardId = useCardSpace((s) => s.hoverCardId)
@@ -236,9 +237,17 @@ export default function SectionPage() {
   }, [hoverCardId, cards])
 
   const complete = async () => {
-    await api.post(`/courses/${courseId}/sections/${sectionId}/complete`)
+    const r = await api.post<{ completed: boolean }>(
+      `/courses/${courseId}/sections/${sectionId}/complete`,
+    )
     qc.invalidateQueries({ queryKey: ['section', sectionId] })
     qc.invalidateQueries({ queryKey: ['course', courseId] })
+    // ★ 学完的那一刻是唯一会有人点「收成笔记」的时机 —— 错过它，笔记系统就是空的。
+    //   所以这里直接把右栏切到笔记并提示，而不是等他自己想起来
+    if (r?.completed) {
+      setRightTab('note')
+      setJustCompleted(true)
+    }
   }
 
   const goto = (id: string) => nav(`/courses/${courseId}/sections/${id}`)
@@ -489,6 +498,7 @@ export default function SectionPage() {
               courseId={courseId}
               sectionId={sectionId}
               completed={section.completed}
+              justCompleted={justCompleted}
             />
           </div>
         </aside>

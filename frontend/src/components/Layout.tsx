@@ -33,12 +33,14 @@ const NAV = [
     ),
   },
   {
-    to: '/vault',
-    label: '仓库',
+    // 「仓库」改成「笔记」：卡片整理进仓库没人回来看 —— 那是过程产物。
+    // 主界面换成真正能读的笔记，卡片降级为它的素材层（见 pages/Vault.tsx）
+    to: '/notes',
+    label: '笔记',
     icon: (
       <>
-        <rect x="3" y="4" width="18" height="16" rx="2.5" />
-        <path d="M3 9.5h18M9 9.5V20" />
+        <path d="M5 4.5A1.5 1.5 0 0 1 6.5 3H15l4 4v12.5A1.5 1.5 0 0 1 17.5 21h-11A1.5 1.5 0 0 1 5 19.5v-15Z" />
+        <path d="M14.5 3v4.5H19M8.5 12h7M8.5 16h4.5" strokeLinecap="round" />
       </>
     ),
   },

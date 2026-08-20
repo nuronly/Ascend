@@ -29,7 +29,7 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import TIER_STANDARD
 from app.core.scope import UserScope
@@ -220,6 +220,118 @@ async def stream_section_note(
             "length": len(body),
         },
     }
+
+
+async def notebook(scope: UserScope) -> dict:
+    """笔记主视图：按课程分组的全部笔记 + 未消化的疑问数。
+
+    ★ 为什么主界面是笔记而不是卡片
+
+      「卡片整理进仓库其实也不会有人看」—— 病因有四个：粒度太碎（脱离语境
+      读不懂）、卡片网格不是阅读单元（那是数据库视图）、「归档」这个动作本身
+      就等于心理上的完结、以及它是**过程产物而不是成果**。把过程产物当主界面，
+      等于让人天天翻草稿箱。
+
+      所以卡片降级为素材层（仍然存在：划词追问的产物、问题图的节点、复习单元），
+      主界面换成笔记 —— 一个真正能读、且有回访理由的单元。
+
+    ★ 分组按「课程 → 小节」而不是时间流
+      笔记的回访路径是「我要复习 Transformer 的注意力那节」，不是「我三周前
+      记了什么」。时间流适合日志，不适合知识。
+
+    ★ undigested（未消化的疑问）
+      卡片被降级之后最大的风险是它们没人管了。这个数字就是安全阀：还没被任何
+      笔记吸收的卡片有多少 —— 它给用户一个明确的行动，而不是一个被藏起来的角落。
+      口径是**小节粒度的近似**：这张卡所属的小节还没有笔记卡，就算未消化。
+      精确到「笔记正文是否真的引用了它」代价太大，而这个近似足够驱动行动。
+    """
+    from app.models.course import Chapter, Course, Section
+
+    rows = list(
+        (
+            await scope.session.execute(
+                select(Card, Section, Chapter, Course)
+                .join(Section, Section.id == Card.source_section_id)
+                .join(Chapter, Chapter.id == Section.chapter_id)
+                .join(Course, Course.id == Chapter.course_id)
+                .where(Card.user_id == scope.user_id, Card.kind == KIND_NOTE)
+                .order_by(Course.created_at.desc(), Chapter.idx, Section.idx)
+            )
+        ).all()
+    )
+
+    # 每节有多少张划词卡（笔记条目上显示「3 张卡」，让人知道它吃进了什么）
+    counts = dict(
+        (
+            await scope.session.execute(
+                select(Card.source_section_id, func.count(Card.id))
+                .where(
+                    Card.user_id == scope.user_id,
+                    Card.kind == KIND_CARD,
+                    Card.state != STATE_ARCHIVED,
+                )
+                .group_by(Card.source_section_id)
+            )
+        ).all()
+    )
+
+    groups: dict[str, dict] = {}
+    for card, section, chapter, course in rows:
+        g = groups.setdefault(
+            course.id,
+            {
+                "course_id": course.id,
+                "course_title": course.title or course.topic,
+                "notes": [],
+            },
+        )
+        body = card.user_note or card.ai_answer
+        g["notes"].append(
+            {
+                "card_id": card.id,
+                "section_id": section.id,
+                "title": f"{chapter.idx + 1}.{section.idx + 1} {section.title}",
+                "state": card.state,
+                "edited": card.is_rewritten,
+                # 摘要剥掉 Markdown 标题行，否则列表里全是「## 这一节解决了什么问题」
+                "excerpt": _excerpt(body),
+                "cards": int(counts.get(section.id, 0)),
+                "updated_at": card.updated_at.isoformat() if card.updated_at else None,
+            }
+        )
+
+    # 每门课总共多少节（用来显示 6/12 节有笔记）
+    totals = dict(
+        (
+            await scope.session.execute(
+                select(Chapter.course_id, func.count(Section.id))
+                .join(Section, Section.chapter_id == Chapter.id)
+                .where(Chapter.course_id.in_(list(groups) or [""]))
+                .group_by(Chapter.course_id)
+            )
+        ).all()
+    )
+    for cid, g in groups.items():
+        g["sections_total"] = int(totals.get(cid, 0))
+
+    # 未消化：所属小节还没有笔记卡的划词卡
+    covered = {str(s.id) for _, s, _, _ in rows}
+    undigested = 0
+    for sid, n in counts.items():
+        if sid and str(sid) not in covered:
+            undigested += int(n)
+
+    return {"groups": list(groups.values()), "undigested": undigested}
+
+
+def _excerpt(md: str, limit: int = 160) -> str:
+    lines = [
+        ln.strip()
+        for ln in (md or "").splitlines()
+        if ln.strip() and not ln.lstrip().startswith("#")
+    ]
+    text = " ".join(lines)
+    return text[:limit]
 
 
 async def note_index(scope: UserScope, course_id: str) -> dict[str, dict]:

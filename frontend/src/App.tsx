@@ -118,6 +118,8 @@ export default function App() {
                         />
                         <Route path="/documents" element={<DocumentsPage />} />
                         <Route path="/documents/:docId" element={<DocReaderPage />} />
+                        {/* 笔记是主界面；/vault 保留，老链接与书签不该失效 */}
+                        <Route path="/notes" element={<VaultPage />} />
                         <Route path="/vault" element={<VaultPage />} />
                         <Route path="/badges" element={<BadgesPage />} />
                         <Route path="/graph" element={<GraphPage />} />

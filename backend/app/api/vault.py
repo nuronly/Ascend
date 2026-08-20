@@ -1,9 +1,14 @@
-"""灵感仓库 API（PLAN §3.2.1）。
+"""笔记与卡片仓库 API（PLAN §3.2.1）。
+
+★ 主界面已经从「卡片仓库」改成「笔记」（见 /notes 与 services/note.notebook）：
+  卡片整理进仓库其实没人回来看 —— 粒度太碎、网格不是阅读单元、「归档」本身就是
+  心理上的完结。卡片因此降级为素材层（仍是划词追问的产物、问题图的节点、
+  复习单元），主界面换成真正能读的笔记。
 
 拒绝坟场，靠三件套：
   1. FSRS 排程主动推送      → review.py
   2. 上下文唤醒             → review.py /wakeup
-  3. 孤岛卡提示             → 本文件 /orphans
+  3. 孤岛卡提示 + 未消化的疑问计数 → 本文件 /orphans、/notes
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from app.models.course import Chapter, Course, Section
 from app.models.learning import ReviewState
 from app.search.fts import search_cards_fts
 from app.services import card as svc
+from app.services import note as note_svc
 
 router = APIRouter(prefix="/vault", tags=["vault"])
 
@@ -124,6 +130,16 @@ async def list_vault(
         out.append(d)
 
     return {"total": total, "cards": out, "query": q}
+
+
+@router.get("/notes")
+async def notebook(scope: Scope) -> dict:
+    """笔记主视图：按课程分组的全部笔记 + 未消化的疑问数。
+
+    「卡片整理进仓库其实也不会有人看」—— 所以主界面换成笔记，卡片降级为素材层。
+    理由与 undigested 的口径见 services/note.notebook。
+    """
+    return await note_svc.notebook(scope)
 
 
 @router.get("/orphans")
