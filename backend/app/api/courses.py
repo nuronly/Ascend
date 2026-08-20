@@ -13,7 +13,7 @@ from app.api.deps import CurrentUser, Scope, user_quota
 from app.api.sse import sse_response
 from app.core.scope import UserScope
 from app.core.types import new_id, utcnow
-from app.models.card import STATE_ARCHIVED, Card
+from app.models.card import KIND_CARD, STATE_ARCHIVED, Card
 from app.models.course import (
     COURSE_DRAFT,
     COURSE_OUTLINING,
@@ -25,6 +25,7 @@ from app.models.course import (
 )
 from app.services import calibrate
 from app.services import course as svc
+from app.services import note as note_svc
 from app.services.runstream import cancel_run, outline_key, section_key, stream_run
 
 log = logging.getLogger(__name__)
@@ -436,6 +437,80 @@ async def update_section(
         setattr(section, k, v)
     await scope.commit()
     return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────
+# 笔记卡（一节学完，卡片与原文汇流成一张永久笔记）
+# ─────────────────────────────────────────────────────────────
+@router.get("/{course_id}/sections/{section_id}/note")
+async def get_section_note(course_id: str, section_id: str, scope: Scope) -> dict:
+    """取这一节已有的笔记卡。没有就返回 exists=false（不是 404 —— 前端要据此显示入口）。"""
+    section, _, course = await scope.section_course(section_id)
+    if course.id != course_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "小节不属于该课程")
+
+    card = await note_svc.existing_note(scope, section.id)
+    if card is None:
+        return {"exists": False, "card_sources": await _note_source_count(scope, section.id)}
+    return {
+        "exists": True,
+        "card_id": card.id,
+        # 展示走「用户终稿 or AI 原稿」：user_note 为空说明他还没动手
+        "content": card.user_note or card.ai_answer,
+        "ai_draft": card.ai_answer,
+        "state": card.state,
+        "edited": card.is_rewritten,
+        "updated_at": card.updated_at.isoformat() if card.updated_at else None,
+    }
+
+
+async def _note_source_count(scope: Scope, section_id: str) -> int:
+    return int(
+        await scope.session.scalar(
+            select(func.count(Card.id)).where(
+                Card.user_id == scope.user_id,
+                Card.source_section_id == section_id,
+                Card.kind == KIND_CARD,
+                Card.state != STATE_ARCHIVED,
+            )
+        )
+        or 0
+    )
+
+
+@router.get("/{course_id}/sections/{section_id}/note/stream")
+async def stream_section_note(
+    course_id: str,
+    section_id: str,
+    request: Request,
+    scope: Scope,
+    user: CurrentUser,
+    force: bool = Query(False),
+):
+    """SSE：把这一节的卡片与原文汇流成一张笔记卡。
+
+    走 runstream：笔记要落库，用户切走再回来应该接着看，而不是从零重写。
+    force=true 是「重新生成」—— 它会新建一张并排放着，绝不覆盖已有的那份。
+    """
+    _, _, course = await scope.section_course(section_id)
+    if course.id != course_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "小节不属于该课程")
+
+    quota = user_quota(user)
+
+    def gen(sc: UserScope):
+        return note_svc.stream_section_note(sc, section_id, force=force, quota=quota)
+
+    return await sse_response(
+        stream_run(f"note:{section_id}", scope.user_id, gen, restart=force), request
+    )
+
+
+@router.get("/{course_id}/notes")
+async def course_notes(course_id: str, scope: Scope) -> dict:
+    """课程内每节的笔记卡状态，用于在章节列表/路径图上标记。"""
+    await scope.require(Course, course_id, "课程")
+    return {"notes": await note_svc.note_index(scope, course_id)}
 
 
 @router.post("/{course_id}/sections/{section_id}/complete")

@@ -143,6 +143,15 @@ async def _migrate_light(conn) -> None:
                 text("ALTER TABLE users ADD COLUMN known_concepts TEXT NOT NULL DEFAULT '[]'")
             )
             log.info("迁移：users 表补充 known_concepts 列")
+
+        # 卡片层级：card（划词卡）/ note（一节汇流成的笔记卡）。
+        # 老数据全是划词卡，默认值正好
+        rows = (await conn.execute(text("PRAGMA table_info(cards)"))).all()
+        if "kind" not in {r[1] for r in rows}:
+            await conn.execute(
+                text("ALTER TABLE cards ADD COLUMN kind TEXT NOT NULL DEFAULT 'card'")
+            )
+            log.info("迁移：cards 表补充 kind 列")
     else:  # pragma: no cover
         await conn.execute(
             text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_guest BOOLEAN NOT NULL DEFAULT FALSE")
@@ -160,6 +169,9 @@ async def _migrate_light(conn) -> None:
             text(
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS known_concepts JSONB NOT NULL DEFAULT '[]'"
             )
+        )
+        await conn.execute(
+            text("ALTER TABLE cards ADD COLUMN IF NOT EXISTS kind VARCHAR(10) NOT NULL DEFAULT 'card'")
         )
 
 

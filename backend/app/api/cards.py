@@ -7,12 +7,14 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import Integer, func, inspect as sa_inspect, or_, select
+from sqlalchemy import Integer, func, or_, select
+from sqlalchemy import inspect as sa_inspect
 
 from app.api.deps import CurrentUser, Scope, user_quota
 from app.api.sse import sse_response
 from app.core.types import new_id, utcnow
 from app.models.card import (
+    KIND_CARD,
     LINK_REAL,
     ORIGIN_MANUAL,
     ORIGIN_PARENT_ANSWER,
@@ -100,6 +102,7 @@ class BulkStateIn(BaseModel):
 def card_dict(c: Card, *, with_messages: bool = True) -> dict:
     d = {
         "id": c.id,
+        "kind": c.kind,
         "question": c.question,
         "ai_answer": c.ai_answer,
         "user_note": c.user_note,
@@ -174,13 +177,17 @@ async def list_cards(
     doc_id: str | None = None,
     state: str | None = Query(None, pattern="^(draft|vault|archived)$"),
     pomodoro_id: str | None = None,
+    kind: str | None = Query(None, pattern="^(card|note)$"),
     limit: int = Query(200, le=500),
 ) -> dict:
     """小节内的全部卡片 + 卡片之间的连线。
 
     这是卡片空间的主数据源 —— 一次拿全，前端不再逐张请求。
+
+    ★ 默认只给划词卡：笔记卡（kind=note）是一节的汇流产物，摆进卡片空间那张
+      画布只会把追问树搅乱。要取它请显式传 kind=note。
     """
-    stmt = scope.select(Card)
+    stmt = scope.select(Card).where(Card.kind == (kind or KIND_CARD))
     if section_id:
         await scope.require_section(section_id)
         stmt = stmt.where(Card.source_section_id == section_id)
@@ -478,13 +485,6 @@ async def update_link(link_id: str, body: LinkUpdateIn, scope: Scope) -> dict:
         link.note = body.note
     await scope.commit()
     return link_dict(link)
-
-
-@router.delete("/links/{link_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_link(link_id: str, scope: Scope) -> None:
-    link = await scope.require(CardLink, link_id, "连线")
-    await scope.session.delete(link)
-    await scope.commit()
 
 
 # ─────────────────────────────────────────────────────────────

@@ -542,6 +542,27 @@ body {
   }
 }
 
+/* 笔记卡的「汇流」：卡片从环形外侧飞向中心并淡出。
+   起点由内联的 --fx/--fy 给（按卡片数均分一圈），所以粒子数就是真实卡片数 ——
+   用户能数出「我的 7 张卡进去了」。动画只负责这 0.9 秒，
+   模型慢不靠拉长它来充数，而是紧接着开始逐字打正文。 */
+@keyframes note-fly {
+  0% {
+    opacity: 0;
+    transform: translate(calc(-50% + var(--fx)), calc(-50% + var(--fy))) scale(0.92);
+  }
+  22% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.55);
+  }
+}
+.note-fly {
+  animation: note-fly 0.85s cubic-bezier(0.5, 0, 0.35, 1) forwards;
+}
+
 .animate-fade-up {
   animation: fade-up 0.22s cubic-bezier(0.16, 1, 0.3, 1);
 }

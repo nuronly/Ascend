@@ -28,6 +28,18 @@ ORIGIN_PARENT_ANSWER = "parent_answer"  # 在 AI 回答里划词 → 子卡（�
 ORIGIN_PARENT_NOTE = "parent_note"  # 在自己写的己见里划词 → 子卡
 ORIGIN_MANUAL = "manual"  # 手动新建
 
+# ── cards.kind：卡片的层级 ──
+# ★ 卢曼卡片盒的三层，这里用同一张表表达（PLAN §1.1 的自然延伸）：
+#     划词提问        → 闪念笔记（fleeting）   kind=card, state=draft
+#     回答 + 己见     → 文献笔记（literature） kind=card, state=vault
+#     一节学完汇流成  → **永久笔记**（permanent） kind=note
+#   为什么不另建 notes 表：笔记卡在语义上就是「更高层级的卡片」，复用这张表
+#   等于免费继承划词追问（在自己的笔记里划词又能提问，这是最有价值的闭环）、
+#   问题图、FSRS 复习、FTS 检索、导出。新建表会把这些能力全部切断，
+#   再一个个重接回来。
+KIND_CARD = "card"
+KIND_NOTE = "note"
+
 # ── cards.state：状态机（PLAN §3.2.1）──
 # draft ──确认/改写──▶ vault（进图谱、进第二大脑、进 FSRS）
 #   └──超时未确认──▶ archived（"未整理"，7 天后可批量清理）
@@ -57,11 +69,20 @@ class Card(Base, TimestampMixin):
         IdType, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
 
+    # 层级：card（划词卡）/ note（一节汇流成的笔记卡）。见上面 KIND_* 的说明
+    kind: Mapped[str] = mapped_column(String(10), default=KIND_CARD, nullable=False)
+
     # ── 内容 ──
     question: Mapped[str] = mapped_column(Text, default="", nullable=False)  # 卡片的问题（划词时用户问的）
-    ai_answer: Mapped[str] = mapped_column(Text, default="", nullable=False)  # AI 首轮回答；后续追问在 card_messages
+    # AI 首轮回答；后续追问在 card_messages。
+    # ★ 笔记卡用它存 **AI 原稿快照**：用户改了也不动这份，随时能「看看 AI 原来写的」——
+    #   知道原版还在，用户才敢大胆删改。
+    ai_answer: Mapped[str] = mapped_column(Text, default="", nullable=False)
     # user_note = 己见。Folium："卡片应该是处理过的思考，而不是摘抄堆积"（PLAN §1.3）
-    # 进度图「绿球 = 写过己见」看的就是它非空
+    # 进度图「绿球 = 写过己见」看的就是它非空。
+    # ★ 笔记卡用它存**用户的终稿**，初始留空（不预填 AI 原稿）：
+    #   展示走 user_note or ai_answer，这样 is_rewritten 仍然如实表示
+    #   「用户真的动手改过」，己见率这个指标不会被自动生成的内容注水。
     user_note: Mapped[str] = mapped_column(Text, default="", nullable=False)
     is_rewritten: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)  # 是否写过己见的冗余标记（查询方便）
 
@@ -144,8 +165,8 @@ class Card(Base, TimestampMixin):
     __table_args__ = (
         # 仓库页：某用户按状态筛、按时间排
         Index("ix_cards_user_state_created", "user_id", "state", "created_at"),
-        # 小节页：某用户在这节建的卡
-        Index("ix_cards_user_section", "user_id", "source_section_id"),
+        # 小节页：某用户在这节建的卡；也用于「这一节有没有笔记卡」
+        Index("ix_cards_user_section_kind", "user_id", "source_section_id", "kind"),
         # 追问树：查某卡的全部子卡
         Index("ix_cards_parent", "parent_card_id"),
         # 番茄回顾：某用户某颗番茄产出的卡

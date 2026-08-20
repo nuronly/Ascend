@@ -11,6 +11,7 @@ import { CardSpace } from '@/components/CardSpace'
 import { SelectionPopover } from '@/components/SelectionPopover'
 import { useSelection, findAnchor } from '@/components/useSelection'
 import { PomodoroPill } from '@/components/Pomodoro'
+import NotePanel from '@/components/NotePanel'
 import RunTimeline, { ResourceList, type ToolStep } from '@/components/RunTimeline'
 import { Badge, Button, Spinner, Tip } from '@/components/ui'
 import { cn } from '@/lib/utils'
@@ -50,6 +51,8 @@ export default function SectionPage() {
   const [tools, setTools] = useState<ToolStep[]>([])
   const [adjustOpen, setAdjustOpen] = useState(false)
   const [narrowDrawer, setNarrowDrawer] = useState(false)
+  // 右栏两件事：卡片空间（本节的追问树）/ 笔记卡（这一节的汇流产物）
+  const [rightTab, setRightTab] = useState<'cards' | 'note'>('cards')
 
   const cards = useCardSpace((s) => s.cards)
   const hoverCardId = useCardSpace((s) => s.hoverCardId)
@@ -449,14 +452,45 @@ export default function SectionPage() {
           </article>
         </div>
 
-        {/* 右：卡片空间。宽屏常驻分栏，窄屏降级为抽屉 */}
+        {/* 右：卡片空间 / 本节笔记。宽屏常驻分栏，窄屏降级为抽屉 */}
         <aside
           className={cn(
-            'shrink-0 bg-[var(--bg-sunken)]',
-            'hidden lg:block lg:w-[clamp(400px,42vw,720px)]',
+            'shrink-0 bg-[var(--bg-sunken)] flex flex-col',
+            'hidden lg:flex lg:w-[clamp(400px,42vw,720px)]',
           )}
         >
-          <CardSpace />
+          <div className="shrink-0 h-9 flex items-center gap-1 px-3 border-b border-[var(--border)]">
+            {(
+              [
+                ['cards', `卡片空间${rootCount ? ` · ${cards.length}` : ''}`],
+                ['note', '本节笔记'],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                onClick={() => setRightTab(key)}
+                className={cn(
+                  'h-6 px-2.5 rounded-[var(--radius-sm)] text-[12px] font-medium transition-colors',
+                  rightTab === key
+                    ? 'bg-[var(--bg-raised)] text-[var(--text)] shadow-[var(--shadow-float)]'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text)]',
+                )}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {/* 两个面板都保持挂载：切回来时卡片位置、笔记编辑内容都还在 */}
+          <div className={cn('grow min-h-0', rightTab === 'cards' ? 'block' : 'hidden')}>
+            <CardSpace />
+          </div>
+          <div className={cn('grow min-h-0', rightTab === 'note' ? 'block' : 'hidden')}>
+            <NotePanel
+              courseId={courseId}
+              sectionId={sectionId}
+              completed={section.completed}
+            />
+          </div>
         </aside>
       </div>
 
