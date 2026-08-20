@@ -15,6 +15,7 @@ from app.core.scope import UserScope
 from app.core.types import new_id, utcnow
 from app.llm import (
     Message,
+    ThinkingBuffer,
     chat,
     chat_json,
     extract_json,
@@ -134,47 +135,9 @@ def _tool_sse(ev, found: dict[str, dict]) -> dict:
     return {"event": "tool_error", "data": {"name": ev.name, "detail": ev.detail}}
 
 
-# ─────────────────────────────────────────────────────────────
-# 思维链
-# ─────────────────────────────────────────────────────────────
-class _Thinking:
-    """把思维链攒成一段一段推给前端。
-
-    ★ 只报「已推理 N 字」是不够的：那只证明进程还活着，用户还是不知道模型
-      在想什么，等待照样难熬。真正让人安心的是看见推理本身 —— 它正在权衡
-      先讲什么、要不要先查一下。所以思维链原文要推出去。
-
-      但不能逐 chunk 直推：思维链是逐 token 来的，一份大纲能有几千个 chunk，
-      原样直推等于让前端 setState 几千次，肉眼可见地卡。攒到 _CHUNK 个字符
-      发一段，既保留原文又把事件数压到几十个，读起来还更像「一句一句在想」。
-    """
-
-    _CHUNK = 48
-
-    def __init__(self) -> None:
-        self.total = 0
-        self._buf: list[str] = []
-        self._len = 0
-
-    def add(self, text: str) -> dict | None:
-        """吃一片思维链；攒够一段就返回待发的 SSE 事件，否则 None。"""
-        self.total += len(text)
-        self._buf.append(text)
-        self._len += len(text)
-        return self.flush() if self._len >= self._CHUNK else None
-
-    def flush(self) -> dict | None:
-        """把没攒满的尾巴吐出来。
-
-        切去调工具或开始吐正文时必须调一次，否则最后那半句思考会一直卡在
-        缓冲里，等下一段思维链才露出来 —— 时序就乱了。
-        """
-        if not self._buf:
-            return None
-        text = "".join(self._buf)
-        self._buf.clear()
-        self._len = 0
-        return {"event": "thinking", "data": {"text": text, "chars": self.total}}
+# 思维链节流器已提到 LLM 层（app/llm/router.ThinkingBuffer）：
+# 大纲、正文、边界校准三处都要用它，留在这里就会有三份拷贝。
+_Thinking = ThinkingBuffer
 
 
 # ─────────────────────────────────────────────────────────────

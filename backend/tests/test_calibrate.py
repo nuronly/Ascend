@@ -24,6 +24,7 @@ _BACKEND = Path(__file__).resolve().parents[1]
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
+from app.llm.base import StreamChunk  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.services import calibrate  # noqa: E402
 
@@ -263,47 +264,155 @@ class Test自评校验:
         assert called["n"] == 0  # 留空 = 跳过，不该白花一次调用
 
 
-class Test概念地图:
-    RAW = {
-        "concepts": [
-            {"name": "矩阵乘法", "gloss": "两个矩阵相乘", "depth": 1, "probe": "q1"},
-            {"name": "自注意力", "gloss": "让每个词看别的词", "depth": 3, "probe": "q3"},
-            {"name": " 矩阵乘法 ", "gloss": "重复项", "depth": 1, "probe": "q1"},
-            {"name": "softmax", "gloss": "归一化", "depth": 9, "probe": "q2"},
-            {"name": "", "gloss": "没名字", "depth": 2},
-        ],
-        "goals": [
-            {"kind": "read_paper", "label": "能读懂原论文"},
-            {"kind": "read_paper", "label": "重复的 kind"},
-            {"kind": "build", "label": "能自己实现一个"},
-        ],
-    }
+# ─────────────────────────────────────────────────────────────
+# 流式概念地图（刷题式校准）
+# ─────────────────────────────────────────────────────────────
+_REAL_STREAM_SIG = inspect.signature(calibrate.stream_chat)
 
-    def test_去重_补档_并按深度排序(self):
-        out = _patched(
-            self.RAW,
-            lambda: calibrate.concept_map(user=_user(), topic="Transformer"),
+_MAP_JSON = (
+    '{"total": 4, "concepts": ['
+    '{"name": "矩阵乘法", "gloss": "两个矩阵相乘", "depth": 1, "probe": ""},'
+    '{"name": "softmax", "gloss": "归一化", "depth": 9, "probe": ""},'
+    '{"name": " 矩阵乘法 ", "gloss": "重复项", "depth": 1, "probe": ""},'
+    '{"name": "自注意力", "gloss": "每个词看别的词", "depth": 3, "probe": "为什么除以根号 d？"}'
+    '], "goals": ['
+    '{"kind": "read_paper", "label": "能读懂原论文"},'
+    '{"kind": "read_paper", "label": "重复的 kind"},'
+    '{"kind": "build", "label": "能自己实现一个"}'
+    "]}"
+)
+
+
+def _fake_stream(*, reasoning: str = "", body: str = _MAP_JSON, boom: Exception | None = None):
+    """按小片吐出来，逼出真实的流式行为（分片会切在任何位置）。"""
+
+    async def gen(*a, **kw):
+        _REAL_STREAM_SIG.bind(*a, **kw)  # 参数名写错要当场暴露，不能靠 **kwargs 兜住
+        if reasoning:
+            for i in range(0, len(reasoning), 7):
+                yield StreamChunk(reasoning=reasoning[i : i + 7])
+        if boom is not None:
+            raise boom
+        for i in range(0, len(body), 5):
+            yield StreamChunk(delta=body[i : i + 5])
+        yield StreamChunk(done=True)
+
+    return gen
+
+
+def _collect(coro_factory, *, cached: str | None = None, stream=None) -> list[dict]:
+    """跑一遍流式生成，收集所有 SSE 事件（同时把缓存与模型都换成替身）。"""
+    real_stream, real_get, real_put = (
+        calibrate.stream_chat, calibrate.cache_get, calibrate.cache_put,
+    )
+    put: dict[str, str] = {}
+
+    async def fake_get(_k):
+        return cached
+
+    async def fake_put(k, *_a):
+        put[k] = "written"
+
+    calibrate.stream_chat = stream or _fake_stream()  # type: ignore[assignment]
+    calibrate.cache_get = fake_get  # type: ignore[assignment]
+    calibrate.cache_put = fake_put  # type: ignore[assignment]
+
+    async def run():
+        return [ev async for ev in coro_factory()]
+
+    try:
+        events = asyncio.run(run())
+    finally:
+        calibrate.stream_chat = real_stream  # type: ignore[assignment]
+        calibrate.cache_get = real_get  # type: ignore[assignment]
+        calibrate.cache_put = real_put  # type: ignore[assignment]
+    events.append({"event": "_cache_written", "data": {"n": len(put)}})
+    return events
+
+
+def _of(events: list[dict], name: str) -> list[dict]:
+    return [e["data"] for e in events if e["event"] == name]
+
+
+class Test流式概念地图:
+    def _run(self, user=None, **kw):
+        u = user or _user()
+        return _collect(
+            lambda: calibrate.stream_concept_map(user=u, topic="Transformer"), **kw
         )
-        names = [c["name"] for c in out["concepts"]]
-        assert names == ["矩阵乘法", "softmax", "自注意力"]  # depth 9 → 2，排中间
-        assert [c["depth"] for c in out["concepts"]] == [1, 2, 3]
+
+    def test_概念一到就单独推一条(self):
+        """刷题的前提：不等整份 JSON 写完，来一道就能答一道。"""
+        ev = self._run()
+        names = [c["name"] for c in _of(ev, "concept")]
+        assert names == ["矩阵乘法", "softmax", "自注意力"]  # 重复项被丢掉
+        assert [c["idx"] for c in _of(ev, "concept")] == [1, 2, 3]
+
+    def test_总题数先到_用户才知道还剩几道(self):
+        ev = self._run()
+        kinds = [e["event"] for e in ev]
+        assert kinds.index("total") < kinds.index("concept")
+        assert _of(ev, "total")[0]["total"] == 4
+
+    def test_档位不可信时归到中间档(self):
+        ev = self._run()
+        by = {c["name"]: c for c in _of(ev, "concept")}
+        assert by["softmax"]["depth"] == 2  # 原始是 9
+
+    def test_思维链原文实时推出去(self):
+        """长推理不是问题，看不见的长推理才是问题。"""
+        ev = self._run(stream=_fake_stream(reasoning="先看这个主题需要什么底子" * 4))
+        th = _of(ev, "thinking")
+        assert th and "".join(t["text"] for t in th).startswith("先看这个主题需要什么底子")
+        # 思考必须在第一道题之前就开始推，否则用户还是对着空白
+        kinds = [e["event"] for e in ev]
+        assert kinds.index("thinking") < kinds.index("concept")
 
     def test_学过的概念预勾成熟悉(self):
-        """复利：学得越多，下一门课要勾的越少。"""
-        out = _patched(
-            self.RAW,
-            lambda: calibrate.concept_map(user=_user(["SOFTMAX"]), topic="Transformer"),
-        )
-        by = {c["name"]: c for c in out["concepts"]}
+        ev = self._run(user=_user(["SOFTMAX"]))
+        by = {c["name"]: c for c in _of(ev, "concept")}
         assert by["softmax"]["preset"] == "known"
         assert by["自注意力"]["preset"] == ""
 
-    def test_目标候选去重且有上限(self):
-        out = _patched(
-            self.RAW,
-            lambda: calibrate.concept_map(user=_user(), topic="Transformer"),
-        )
-        assert [g["kind"] for g in out["goals"]] == ["read_paper", "build"]
+    def test_目标候选在最后给出且去重(self):
+        ev = self._run()
+        assert [g["kind"] for g in _of(ev, "goals")[0]["goals"]] == ["read_paper", "build"]
+        assert ev[-2]["event"] == "done"  # -1 是测试自己加的缓存标记
+
+    def test_跑完才写缓存(self):
+        ev = self._run()
+        assert ev[-1]["data"]["n"] == 1
+
+    def test_失败也要给_done(self):
+        """否则前端会一直转圈，走不到「直接开始」那条降级路。"""
+        ev = self._run(stream=_fake_stream(boom=RuntimeError("上游 500")))
+        assert [e["event"] for e in ev][-3:-1] == ["error", "done"]
+        assert _of(ev, "done")[0]["failed"] is True
+        assert ev[-1]["data"]["n"] == 0  # 半截地图绝不能进缓存
+
+    def test_缓存命中秒回放且不调模型(self):
+        def explode(*_a, **_kw):
+            raise AssertionError("缓存命中还去调模型了")
+
+        ev = self._run(cached=_MAP_JSON, stream=explode)
+        assert [c["name"] for c in _of(ev, "concept")] == ["矩阵乘法", "softmax", "自注意力"]
+        assert _of(ev, "total")[0]["cached"] is True
+        assert _of(ev, "done")[0]["cached"] is True
+
+    def test_缓存坏了就当没有_退回真生成(self):
+        ev = self._run(cached="{不是合法 JSON")
+        assert len(_of(ev, "concept")) == 3
+
+
+class Test规整单条:
+    def test_丢掉无名与重复(self):
+        seen: set[str] = set()
+        assert calibrate._shape_concept({"name": ""}, set(), seen) is None
+        assert calibrate._shape_concept({"name": "A"}, set(), seen) is not None
+        assert calibrate._shape_concept({"name": " a "}, set(), seen) is None  # 归一化后重复
+
+    def test_不是字典也不炸(self):
+        assert calibrate._shape_concept("字符串", set(), set()) is None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -316,7 +425,8 @@ def _独立运行() -> int:
         Test覆盖率自检,
         Test抽查选题,
         Test自评校验,
-        Test概念地图,
+        Test流式概念地图,
+        Test规整单条,
     ]
     ok = failed = 0
     for cls in classes:

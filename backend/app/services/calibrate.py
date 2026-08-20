@@ -33,13 +33,24 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
+from collections.abc import AsyncIterator
 from typing import Any
 
 from app.core.config import TIER_STANDARD
 from app.core.types import utcnow
-from app.llm import Message, chat_json
+from app.llm import (
+    JsonArrayStream,
+    Message,
+    ThinkingBuffer,
+    chat_json,
+    extract_json,
+    repair_truncated_json,
+    stream_chat,
+)
+from app.llm.cache import cache_get, cache_key, cache_put
 from app.models.user import User
 from app.services import prompts
 
@@ -57,85 +68,174 @@ KNOWN_CAP = 400
 _STATES = ("known", "shaky", "unknown")
 
 
+_TOTAL_PROBE = re.compile(r'"total"\s*:\s*(\d+)')
+
+
 def norm(name: str) -> str:
     """概念名的比对键。展示一律用原文，只有比对走这里。"""
     return " ".join(str(name or "").split()).lower()
 
 
 # ─────────────────────────────────────────────────────────────
-# 概念地图
+# 流式概念地图（刷题式校准）
 # ─────────────────────────────────────────────────────────────
-async def concept_map(
-    *, user: User, topic: str, extra: str = "", quota: int | None = None
-) -> dict:
-    """生成这个主题的概念地图与目标候选。
+def _shape_concept(raw: Any, already: set[str], seen: set[str]) -> dict | None:
+    """把模型给的一条概念规整成前端要的形状；重复或无名的丢掉。"""
+    if not isinstance(raw, dict):
+        return None
+    name = str(raw.get("name") or "").strip()[:80]
+    key = norm(name)
+    if not name or key in seen:
+        return None
+    seen.add(key)
+    depth = raw.get("depth")
+    return {
+        "name": name,
+        "gloss": str(raw.get("gloss") or "").strip()[:120],
+        # 档位不可信时归到中间档：宁可位置不准，也不能因为一个坏字段丢掉概念
+        "depth": depth if depth in (1, 2, 3) else 2,
+        "probe": str(raw.get("probe") or "").strip()[:200],
+        # 预勾：上次学过的东西不该再问一遍
+        "preset": "known" if key in already else "",
+    }
 
-    按 topic 缓存（chat_json 的 use_cache 走对话内容哈希）：同一主题所有用户
-    共用一份，成本可忽略。
 
-    命中用户已知边界的概念会被**预勾成「熟悉」**——这是这套设计的复利：
-    学得越多，下一门课要勾的越少，AI 越清楚该从哪句话讲起。
-    """
-    data = await chat_json(
-        [
-            Message(role="system", content=prompts.CALIBRATE_SYSTEM),
-            Message(role="user", content=prompts.calibrate_user(topic, extra)),
-        ],
-        scene="calibrate",
-        tier=TIER_STANDARD,
-        user_id=user.id,
-        temperature=0.3,  # 概念地图要稳定可缓存，不需要创造力
-        # 与大纲一致的 16000：思维链也吃这份额度，而它的长度取决于主题难度 ——
-        # 8000 时「Transformer 注意力机制」就被吃光过一次（零产出后靠重试才救回来，
-        # 等于白烧一次调用）。额度是上限不是消耗，给足没有代价
-        max_tokens=16000,
-        use_cache=True,
-        quota=quota,
-    )
-
-    already = {norm(c) for c in (user.known_concepts or [])}
-    concepts: list[dict] = []
-    seen: set[str] = set()
-    for raw in data.get("concepts") or []:
-        if not isinstance(raw, dict):
-            continue
-        name = str(raw.get("name") or "").strip()[:80]
-        key = norm(name)
-        if not name or key in seen:
-            continue
-        seen.add(key)
-        depth = raw.get("depth")
-        concepts.append(
-            {
-                "name": name,
-                "gloss": str(raw.get("gloss") or "").strip()[:120],
-                # 档位不可信时归到中间档：宁可位置不准，也不能因为一个坏字段丢掉概念
-                "depth": depth if depth in (1, 2, 3) else 2,
-                "probe": str(raw.get("probe") or "").strip()[:200],
-                # 预勾：上次学过的东西不该再问一遍
-                "preset": "known" if key in already else "",
-            }
-        )
-        if len(concepts) >= CONCEPT_LIMIT:
-            break
-
+def _shape_goals(raw: Any) -> list[dict]:
     goals: list[dict] = []
     kinds: set[str] = set()
-    for raw in data.get("goals") or []:
-        if not isinstance(raw, dict):
+    for g in raw or []:
+        if not isinstance(g, dict):
             continue
-        kind = str(raw.get("kind") or "").strip()[:40]
-        label = str(raw.get("label") or "").strip()[:120]
+        kind = str(g.get("kind") or "").strip()[:40]
+        label = str(g.get("label") or "").strip()[:120]
         if not label or kind in kinds:
             continue
         kinds.add(kind)
         goals.append({"kind": kind or "apply", "label": label})
         if len(goals) >= GOAL_LIMIT:
             break
+    return goals
 
-    # 按依赖深度排，前端一屏三档从浅到深铺开
-    concepts.sort(key=lambda c: c["depth"])
-    return {"concepts": concepts, "goals": goals}
+
+def _map_key(topic: str, extra: str) -> str:
+    return cache_key("calibmap", topic.strip().lower(), extra.strip().lower())
+
+
+async def stream_concept_map(
+    *, user: User, topic: str, extra: str = "", quota: int | None = None
+) -> AsyncIterator[dict]:
+    """流式产出概念地图：一道一道地出，边出边让人勾。
+
+    ★ 为什么必须流式
+
+      一次性等模型把 15 个概念全部想完再返回，用户要对着空白等 20~30 秒 ——
+      而每个概念在生成出来的那一刻就已经可以勾了。所以这里做三件事，
+      让「等待」变成「已经在做事」：
+
+        1. 思维链原文实时推出去 —— 长推理不是问题，**看不见的**长推理才是问题
+        2. total 先到（prompt 要求它是第一个键），前端立刻能说「共 15 道」
+        3. 每个概念一闭合就推一条，前端一道一道地问
+
+      缓存命中时整份瞬间回放：同一主题的第二个人几乎零等待。
+      preset（预勾）不能进缓存 —— 那是每个人自己的已知边界，回放时才计算。
+    """
+    already = {norm(c) for c in (user.known_concepts or [])}
+    seen: set[str] = set()
+    sent = 0
+
+    # ── 缓存命中：秒回放 ──
+    if cached := await cache_get(_map_key(topic, extra)):
+        try:
+            data = json.loads(cached)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            concepts = [c for c in (data.get("concepts") or [])][:CONCEPT_LIMIT]
+            yield {"event": "total", "data": {"total": len(concepts), "cached": True}}
+            for raw in concepts:
+                if shaped := _shape_concept(raw, already, seen):
+                    sent += 1
+                    yield {"event": "concept", "data": {**shaped, "idx": sent}}
+            yield {"event": "goals", "data": {"goals": _shape_goals(data.get("goals"))}}
+            yield {"event": "done", "data": {"count": sent, "cached": True}}
+            return
+
+    messages = [
+        Message(role="system", content=prompts.CALIBRATE_SYSTEM),
+        Message(role="user", content=prompts.calibrate_user(topic, extra)),
+    ]
+
+    think = ThinkingBuffer()
+    objects = JsonArrayStream("concepts")
+    buf: list[str] = []
+    total_sent = False
+
+    try:
+        async for chunk in stream_chat(
+            messages,
+            scene="calibrate",
+            tier=TIER_STANDARD,
+            user_id=user.id,
+            temperature=0.3,  # 概念地图要稳定可缓存，不需要创造力
+            # 与大纲一致：思维链也吃这份额度，8000 曾被「Transformer 注意力机制」
+            # 整个吃光（零产出后靠重试救回来，等于白烧一次调用）
+            max_tokens=16000,
+            json_mode=True,
+            quota=quota,
+        ):
+            if chunk.done:
+                break
+            if chunk.reasoning:
+                if pending := think.add(chunk.reasoning):
+                    yield pending
+                continue
+            if pending := think.flush():  # 开始吐 JSON 了，思考阶段收尾
+                yield pending
+            if not chunk.delta:
+                continue
+            buf.append(chunk.delta)
+
+            # total 是第一个键，尽早让前端说出「共几道」
+            if not total_sent and (m := _TOTAL_PROBE.search("".join(buf))):
+                total_sent = True
+                yield {"event": "total", "data": {"total": min(int(m.group(1)), CONCEPT_LIMIT)}}
+
+            for raw in objects.feed(chunk.delta):
+                if sent >= CONCEPT_LIMIT:
+                    break
+                if shaped := _shape_concept(raw, already, seen):
+                    sent += 1
+                    yield {"event": "concept", "data": {**shaped, "idx": sent}}
+    except Exception as exc:
+        log.warning("概念地图流式生成失败（%s）：%s", topic, exc)
+        # 失败也要给 done —— 前端据此走「直接开始」的降级路，绝不卡在转圈上
+        yield {"event": "error", "data": {"message": str(exc)[:300]}}
+        yield {"event": "done", "data": {"count": sent, "failed": True}}
+        return
+
+    raw_text = "".join(buf)
+    goals: list[dict] = []
+    try:
+        try:
+            data = extract_json(raw_text)
+        except ValueError:
+            repaired = repair_truncated_json(raw_text)
+            data = json.loads(repaired) if repaired else {}
+        goals = _shape_goals((data or {}).get("goals"))
+        # 概念全部完整时才写缓存，免得把半截地图存下来喂给下一个人
+        if isinstance(data, dict) and (data.get("concepts") or goals) and sent:
+            await cache_put(
+                _map_key(topic, extra), "calibrate", "stream", json.dumps(data, ensure_ascii=False)
+            )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("概念地图收尾解析失败（目标候选可能缺失）：%s", exc)
+
+    yield {"event": "goals", "data": {"goals": goals}}
+    yield {"event": "done", "data": {"count": sent}}
+
+
+# 一次性版本（concept_map）已删除：它和流式版是两条会互相漂移的路，
+# 而它唯一的优势「实现简单」抵不上让用户对着空白等 20 秒的代价。
 
 
 def pick_probes(concepts: list[dict], states: dict[str, str]) -> list[dict]:

@@ -35,11 +35,6 @@ router = APIRouter(prefix="/courses", tags=["courses"])
 # ─────────────────────────────────────────────────────────────
 # Schemas
 # ─────────────────────────────────────────────────────────────
-class CalibrateIn(BaseModel):
-    topic: str = Field(min_length=2, max_length=200)
-    extra: str = Field(default="", max_length=1000)
-
-
 class ConceptStateIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     state: str = Field(pattern="^(known|shaky|unknown)$")
@@ -220,25 +215,30 @@ async def list_courses(scope: Scope, limit: int = Query(50, le=200)) -> list[dic
     return out
 
 
-@router.post("/calibrate")
-async def calibrate_topic(body: CalibrateIn, scope: Scope, user: CurrentUser) -> dict:
-    """开课前的边界校准：给出这个主题的概念地图与目标候选。
+@router.get("/calibrate/stream")
+async def calibrate_stream(
+    request: Request,
+    scope: Scope,
+    user: CurrentUser,
+    topic: str = Query(min_length=2, max_length=200),
+    extra: str = Query("", max_length=1000),
+):
+    """开课前的边界校准：**一道一道**地流式产出概念地图。
 
-    ★ 这一步取代了「入门 / 进阶 / 深入」。理由见 services/calibrate.py：
-      等级是个谁也答不准的问题，而且模型也无从执行「深入」。
+    ★ 这一步取代了「入门 / 进阶 / 深入」（理由见 services/calibrate.py）。
+      为什么是 SSE 而不是一次性返回：模型要想 20~30 秒，一次性返回等于让用户
+      对着空白干等，而每个概念生成出来的那一刻就已经可以勾了。
+      所以思维链原文、总题数、每一道概念都是边生成边推的。
 
-    失败绝不能挡住建课 —— 那是这个产品最珍贵的一秒。所以出错时返回空地图，
-    前端直接走「跳过校准」的路。
+    这里刻意**不走 runstream**：校准是纯读操作，没有任何落库，用户关掉页面就
+    该停 —— 那和「正文已经烧了半分钟 token，跑完落库才算止损」是相反的取舍。
     """
-    try:
-        data = await calibrate.concept_map(
-            user=user, topic=body.topic.strip(), extra=body.extra.strip(),
-            quota=user_quota(user),
-        )
-    except Exception as exc:  # noqa: BLE001
-        log.warning("概念地图生成失败（%s）：%s", body.topic, exc)
-        return {"concepts": [], "goals": [], "degraded": True}
-    return {**data, "degraded": not data["concepts"]}
+    return await sse_response(
+        calibrate.stream_concept_map(
+            user=user, topic=topic.strip(), extra=extra.strip(), quota=user_quota(user)
+        ),
+        request,
+    )
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

@@ -1,35 +1,51 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import CalibratePage from './Calibrate'
 
 /**
- * 开课前的边界校准页。
+ * 刷题式的边界校准页。
  *
- * 这一页取代了「入门 / 进阶 / 深入」，它有一条不能破的铁律：
- * **永远不许挡住开课**。点开课的那一秒是这个产品最珍贵的资源 ——
- * 概念地图失败、模型超时、用户没耐心，都必须有一键直达的出口。
- * 所以这里断言的重点不是好看，而是「出口一直在」和「勾选真的会改变问的问题」。
+ * 这一页取代了「入门 / 进阶 / 深入」，它有两条不能破的铁律：
+ *
+ *   1. **不许让用户对着空白等**。模型规划这十几个概念要想 20~30 秒，所以
+ *      概念是一道一道流过来的：来一道就能答一道，还没来就把思维链摊出来。
+ *   2. **不许挡住开课**。任何阶段都有出口，流式失败也要能拿已到手的几道继续。
+ *
+ * 所以这里断言的重点是「边到边答」和「出口一直在」，而不是排版。
  */
 
-const { post } = vi.hoisted(() => ({ post: vi.fn() }))
+const { post, sse } = vi.hoisted(() => ({ post: vi.fn(), sse: vi.fn() }))
 
 vi.mock('@/lib/api', () => ({
   api: { post, get: vi.fn(), del: vi.fn(), patch: vi.fn() },
+  sse: (...args: any[]) => sse(...args),
 }))
 
-const MAP = {
-  concepts: [
-    { name: '矩阵乘法', gloss: '两个矩阵相乘', depth: 1, probe: '为什么不可交换？', preset: '' },
-    { name: 'softmax', gloss: '归一化成概率', depth: 2, probe: '它为什么对最大值敏感？', preset: 'known' },
-    { name: '自注意力', gloss: '每个词看别的词', depth: 3, probe: '为什么要除以根号 d？', preset: '' },
-  ],
-  goals: [
-    { kind: 'read_paper', label: '能读懂原论文的公式部分' },
-    { kind: 'build', label: '能自己写一个 mini 实现' },
-  ],
+type Handlers = {
+  onEvent?: (ev: string, data: any) => void
+  onDone?: () => void
+  onError?: (m: string) => void
 }
+
+/** 抓住页面注册的回调，测试自己控制事件节奏 —— 这才测得出「边到边答」 */
+let h: Handlers = {}
+
+function emit(ev: string, data: any) {
+  act(() => h.onEvent?.(ev, data))
+}
+function finish() {
+  act(() => h.onDone?.())
+}
+
+const C = (name: string, depth: 1 | 2 | 3, probe = '', preset = '') => ({
+  name,
+  gloss: `${name} 的一句话解释`,
+  depth,
+  probe,
+  preset,
+})
 
 function view(search = '?topic=Transformer') {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -42,114 +58,148 @@ function view(search = '?topic=Transformer') {
   )
 }
 
-beforeEach(() => post.mockReset())
+beforeEach(() => {
+  post.mockReset()
+  h = {}
+  sse.mockReset()
+  sse.mockImplementation((_url: string, opts: Handlers) => {
+    h = opts
+    return Promise.resolve()
+  })
+})
 afterEach(cleanup)
 
 describe('CalibratePage', () => {
-  it('概念按依赖深度分三档摆出来，每个都带人话解释', async () => {
-    post.mockResolvedValueOnce(MAP)
+  it('第一道还没到时显示思考过程，不留空白', async () => {
     view()
-    await waitFor(() => expect(screen.getByText('自注意力')).toBeTruthy())
-    expect(screen.getByText('外围基础')).toBeTruthy()
-    expect(screen.getByText('直接前置')).toBeTruthy()
-    expect(screen.getByText('主题内核心')).toBeTruthy()
-    // 认不出名字的人会把「熟悉」误判成「没接触」，所以解释必须在
-    expect(screen.getByText('每个词看别的词')).toBeTruthy()
+    expect(screen.getByText('正在规划要问你哪些概念…')).toBeTruthy()
+    emit('thinking', { chars: 42, text: '先确认这个主题需要哪些前置' })
+    await waitFor(() => expect(screen.getByText('先确认这个主题需要哪些前置')).toBeTruthy())
+    // 等不及也能直接走
+    expect(screen.getByText('不等了，直接开课')).toBeTruthy()
   })
 
-  it('学过的概念被预勾，并且明确告诉用户为什么', async () => {
-    post.mockResolvedValueOnce(MAP)
+  it('总题数一到就说得出还剩几道', async () => {
     view()
-    await waitFor(() => expect(screen.getByText(/已经替你勾了 1 个/)).toBeTruthy())
-    // 预勾的那个默认就是「熟悉」，于是它的抽查题也已经出现
-    expect(screen.getByText(/它为什么对最大值敏感/)).toBeTruthy()
+    emit('total', { total: 15 })
+    emit('concept', { ...C('矩阵乘法', 1), idx: 1 })
+    await waitFor(() => expect(screen.getByText('1 / 15')).toBeTruthy())
+    expect(screen.getByText(/已规划 1 \/ 15/)).toBeTruthy()
   })
 
-  it('抽查跟着勾选变：勾了最深的那个，问的就是它', async () => {
-    post.mockResolvedValueOnce(MAP)
+  it('来一道答一道：答完当前的就等下一道，而不是卡住', async () => {
     view()
-    await waitFor(() => expect(screen.getByText('自注意力')).toBeTruthy())
-    expect(screen.queryByText(/为什么要除以根号 d/)).toBeNull()
+    emit('total', { total: 3 })
+    emit('concept', { ...C('矩阵乘法', 1), idx: 1 })
+    await waitFor(() => expect(screen.getByText('矩阵乘法')).toBeTruthy())
 
-    fireEvent.click(within(rowOf('自注意力')).getByText('熟悉'))
+    fireEvent.click(screen.getByText('熟悉'))
+    // 下一道还没到 → 显示「正在规划下一道」，不是空白也不是结束
+    await waitFor(() => expect(screen.getByText('正在规划下一道…')).toBeTruthy())
 
-    await waitFor(() => expect(screen.getByText(/为什么要除以根号 d/)).toBeTruthy())
+    emit('concept', { ...C('softmax', 2), idx: 2 })
+    await waitFor(() => expect(screen.getByText('softmax')).toBeTruthy())
+    expect(screen.getByText('2 / 3')).toBeTruthy()
   })
 
-  it('最深档全勾熟悉时，当场说这门课太浅', async () => {
-    post.mockResolvedValueOnce({
-      concepts: [1, 2, 3].map((i) => ({
-        name: `核心${i}`,
-        gloss: '',
-        depth: 3,
-        probe: `q${i}`,
-        preset: 'known',
-      })),
-      goals: [],
-    })
+  it('键盘 1/2/3 能答题，← 能回上一道改答案', async () => {
     view()
+    emit('concept', { ...C('矩阵乘法', 1), idx: 1 })
+    emit('concept', { ...C('softmax', 2), idx: 2 })
+    await waitFor(() => expect(screen.getByText('矩阵乘法')).toBeTruthy())
+
+    act(() => void fireEvent.keyDown(window, { key: '2' }))
+    await waitFor(() => expect(screen.getByText('softmax')).toBeTruthy())
+
+    act(() => void fireEvent.keyDown(window, { key: 'ArrowLeft' }))
+    await waitFor(() => expect(screen.getByText('矩阵乘法')).toBeTruthy())
+  })
+
+  it('答完全部且流结束后进入定目标', async () => {
+    view()
+    emit('concept', { ...C('矩阵乘法', 1), idx: 1 })
+    emit('goals', { goals: [{ kind: 'build', label: '能自己写一个 mini 实现' }] })
+    finish()
+    await waitFor(() => expect(screen.getByText('矩阵乘法')).toBeTruthy())
+    fireEvent.click(screen.getByText('没接触'))
+    await waitFor(() => expect(screen.getByText('学完之后你想能做什么')).toBeTruthy())
+    expect(screen.getByText('能自己写一个 mini 实现')).toBeTruthy()
+  })
+
+  it('最深档全勾熟悉时当场说这门课太浅', async () => {
+    view()
+    ;[1, 2, 3].forEach((i) => emit('concept', { ...C(`核心${i}`, 3, `q${i}`), idx: i }))
+    emit('goals', { goals: [] })
+    finish()
+    await waitFor(() => expect(screen.getByText('核心1')).toBeTruthy())
+    fireEvent.click(screen.getByText('熟悉'))
+    fireEvent.click(screen.getByText('熟悉'))
+    fireEvent.click(screen.getByText('熟悉'))
     await waitFor(() => expect(screen.getByText('这门课对你可能太浅了')).toBeTruthy())
   })
 
-  it('概念地图失败也能一键开课 —— 绝不挡住最珍贵的那一秒', async () => {
-    post.mockResolvedValueOnce({ concepts: [], goals: [], degraded: true })
+  it('一道都没规划出来也能一键开课 —— 绝不挡住最珍贵的那一秒', async () => {
+    post.mockResolvedValueOnce({ id: 'c1' })
     view()
-    await waitFor(() => expect(screen.getByText('这次没能生成概念地图')).toBeTruthy())
+    emit('error', { message: '上游 500' })
+    finish()
+    await waitFor(() => expect(screen.getByText('这次没能规划出概念')).toBeTruthy())
     fireEvent.click(screen.getByText('直接开始'))
-    // 第二次调用就是建课，且不带 calibration
-    await waitFor(() => expect(post).toHaveBeenCalledTimes(2))
-    expect(post.mock.calls[1][0]).toBe('/courses')
-    expect(post.mock.calls[1][1]).not.toHaveProperty('calibration')
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    expect(post.mock.calls[0][0]).toBe('/courses')
+    expect(post.mock.calls[0][1]).toEqual({ topic: 'Transformer', extra: '' })
+  })
+
+  it('中途失败也用已经到手的几道继续，不浪费', async () => {
+    view()
+    emit('concept', { ...C('矩阵乘法', 1), idx: 1 })
+    emit('error', { message: '断了' })
+    finish()
+    await waitFor(() => expect(screen.getByText('矩阵乘法')).toBeTruthy())
+    fireEvent.click(screen.getByText('听过'))
+    await waitFor(() => expect(screen.getByText(/用已经问到的 1 道继续/)).toBeTruthy())
   })
 
   it('提交时把三态、目标、抽查回答一起送出去', async () => {
-    post.mockResolvedValueOnce(MAP)
     post.mockResolvedValueOnce({ id: 'c1' })
     view('?topic=Transformer&extra=偏工程')
-    await waitFor(() => expect(screen.getByText('自注意力')).toBeTruthy())
+    emit('concept', { ...C('矩阵乘法', 1), idx: 1 })
+    emit('concept', { ...C('自注意力', 3, '为什么要除以根号 d？'), idx: 2 })
+    emit('goals', { goals: [{ kind: 'build', label: '能自己写一个 mini 实现' }] })
+    finish()
 
-    fireEvent.click(within(rowOf('矩阵乘法')).getByText('听过'))
+    await waitFor(() => expect(screen.getByText('矩阵乘法')).toBeTruthy())
+    fireEvent.click(screen.getByText('听过'))
+    await waitFor(() => expect(screen.getByText('自注意力')).toBeTruthy())
+    fireEvent.click(screen.getByText('熟悉'))
+
+    await waitFor(() => expect(screen.getByText('学完之后你想能做什么')).toBeTruthy())
     fireEvent.click(screen.getByText('能自己写一个 mini 实现'))
+    fireEvent.click(screen.getByText('下一步'))
+
+    await waitFor(() => expect(screen.getByText('顺手确认一下')).toBeTruthy())
     fireEvent.change(screen.getByPlaceholderText('一句话说说你的理解…'), {
       target: { value: '因为点积会随维度变大' },
     })
     fireEvent.click(screen.getByText('按这个边界开课'))
 
-    await waitFor(() => expect(post).toHaveBeenCalledTimes(2))
-    const body = post.mock.calls[1][1] as any
+    await waitFor(() => expect(post).toHaveBeenCalledTimes(1))
+    const body = post.mock.calls[0][1] as any
     expect(body.topic).toBe('Transformer')
     expect(body.extra).toBe('偏工程')
     expect(body.calibration.concepts).toEqual([
       { name: '矩阵乘法', state: 'shaky' },
-      { name: 'softmax', state: 'known' },
-      { name: '自注意力', state: 'unknown' },
+      { name: '自注意力', state: 'known' },
     ])
     expect(body.calibration.goal).toBe('能自己写一个 mini 实现')
-    expect(body.calibration.goal_kind).toBe('build')
     expect(body.calibration.probes).toEqual([
-      { concept: 'softmax', question: '它为什么对最大值敏感？', answer: '因为点积会随维度变大' },
+      { concept: '自注意力', question: '为什么要除以根号 d？', answer: '因为点积会随维度变大' },
     ])
   })
 
-  it('跳过按钮一直在，且不带任何校准数据', async () => {
-    post.mockResolvedValueOnce(MAP)
-    post.mockResolvedValueOnce({ id: 'c1' })
+  it('学过的概念预勾成熟悉，并当场说明为什么', async () => {
     view()
-    await waitFor(() => expect(screen.getByText('跳过，直接开始')).toBeTruthy())
-    fireEvent.click(screen.getByText('跳过，直接开始'))
-    await waitFor(() => expect(post).toHaveBeenCalledTimes(2))
-    expect(post.mock.calls[1][1]).toEqual({ topic: 'Transformer', extra: '' })
+    emit('concept', { ...C('softmax', 2, 'q', 'known'), idx: 1 })
+    await waitFor(() => expect(screen.getByText('你之前学过它，已经替你勾上了')).toBeTruthy())
   })
 })
-
-/** 定位某个概念所在的那一行。
- *  往上走到「自己就带着三态按钮」的那层为止 —— 不依赖具体 DOM 层数，
- *  改了排版也不会把测试一起改坏。 */
-function rowOf(name: string): HTMLElement {
-  let el: HTMLElement | null = screen.getByText(name)
-  const hasStates = (n: HTMLElement) =>
-    Array.from(n.querySelectorAll('button')).some((b) => b.textContent?.trim() === '熟悉')
-  while (el && !hasStates(el)) el = el.parentElement
-  if (!el) throw new Error(`找不到「${name}」所在的行`)
-  return el
-}

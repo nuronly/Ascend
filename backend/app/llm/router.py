@@ -101,6 +101,136 @@ def extract_json(text: str) -> Any:
     raise ValueError(f"无法从 LLM 输出中解析 JSON：{text[:300]}")
 
 
+class ThinkingBuffer:
+    """把思维链攒成一段一段推给前端。
+
+    ★ 只报「已推理 N 字」是不够的：那只证明进程还活着，用户还是不知道模型在
+      想什么，等待照样难熬。真正让人安心的是看见推理本身。所以思维链原文要
+      推出去 —— 长推理不是问题，**看不见的长推理**才是问题。
+
+      但不能逐 chunk 直推：思维链是逐 token 来的，一次生成能有几千个 chunk，
+      原样直推等于让前端 setState 几千次，肉眼可见地卡。攒到 _CHUNK 个字符发
+      一段，既保留原文又把事件数压到几十个，读起来还更像「一句一句在想」。
+
+    大纲、小节正文、边界校准三处共用 —— 留在业务层就会有三份拷贝。
+    """
+
+    _CHUNK = 48
+
+    __slots__ = ("total", "_buf", "_len")
+
+    def __init__(self) -> None:
+        self.total = 0
+        self._buf: list[str] = []
+        self._len = 0
+
+    def add(self, text: str) -> dict | None:
+        """吃一片思维链；攒够一段就返回待发的 SSE 事件，否则 None。"""
+        self.total += len(text)
+        self._buf.append(text)
+        self._len += len(text)
+        return self.flush() if self._len >= self._CHUNK else None
+
+    def flush(self) -> dict | None:
+        """把没攒满的尾巴吐出来。
+
+        切去调工具、或开始吐正文之前必须调一次，否则最后那半句思考会一直卡在
+        缓冲里，等下一段思维链才露出来 —— 时序就乱了。
+        """
+        if not self._buf:
+            return None
+        text = "".join(self._buf)
+        self._buf.clear()
+        self._len = 0
+        return {"event": "thinking", "data": {"text": text, "chars": self.total}}
+
+
+class JsonArrayStream:
+    """从**还没写完**的 JSON 里，把某个数组里已经闭合的对象一个个取出来。
+
+    ★ 为什么需要它：一次性等模型把 15 个概念全部生成完，用户要干等半分钟，
+      而其中每一个概念在生成出来的那一刻就已经可以让人开始勾选了。
+      这个类把「等全部」变成「来一个用一个」—— 校准页就从「读进度条」
+      变成了「刷题」。
+
+    做法与 repair_truncated_json 同族：扫描时维护括号栈与字符串状态，
+    只在**数组内层深为 1 的对象闭合**时产出一条。字符串里的括号和转义引号
+    不能干扰配对，否则一个带 `{` 的解释文字就能把整个流搞乱。
+
+    用法：喂增量分片，每次取回这一片里新完成的对象。
+    """
+
+    __slots__ = (
+        "_key", "_buf", "_pos", "_depth", "_start", "_in_str", "_esc", "_armed", "_done",
+    )
+
+    def __init__(self, key: str) -> None:
+        self._key = f'"{key}"'
+        self._buf = ""
+        self._pos = 0  # 已扫描到哪
+        self._depth = 0  # 相对数组内部的对象层深
+        self._start = -1  # 当前对象的起始位置
+        self._in_str = False
+        self._esc = False
+        self._armed = False  # 是否已经进入目标数组
+        # 数组闭合后必须彻底停手。忘了这一步的话，后面的 goals 会被当成概念
+        # 一起吐出来 —— 自测按 2 字符分片时立刻抓到了这个 bug
+        self._done = False
+
+    def feed(self, chunk: str) -> list[Any]:
+        """吃一段增量，返回其中新闭合的对象（按出现顺序）。"""
+        if self._done:
+            return []
+        self._buf += chunk
+        out: list[Any] = []
+
+        # 还没找到目标数组：等 `"concepts": [` 出现
+        if not self._armed:
+            k = self._buf.find(self._key)
+            if k == -1:
+                return out
+            lb = self._buf.find("[", k + len(self._key))
+            if lb == -1:
+                return out
+            self._armed = True
+            self._pos = lb + 1
+
+        i = self._pos
+        while i < len(self._buf):
+            ch = self._buf[i]
+            if self._esc:
+                self._esc = False
+            elif self._in_str:
+                if ch == "\\":
+                    self._esc = True
+                elif ch == '"':
+                    self._in_str = False
+            elif ch == '"':
+                self._in_str = True
+            elif ch == "{":
+                if self._depth == 0:
+                    self._start = i
+                self._depth += 1
+            elif ch == "}":
+                self._depth -= 1
+                if self._depth == 0 and self._start >= 0:
+                    raw = self._buf[self._start : i + 1]
+                    try:
+                        out.append(json.loads(raw))
+                    except json.JSONDecodeError:
+                        log.debug("流式 JSON 对象解析失败，跳过：%s", raw[:120])
+                    self._start = -1
+            elif ch == "]" and self._depth == 0:
+                # 数组结束。后面的内容（goals 等）不属于我们，交给最终的整体解析
+                self._done = True
+                self._buf = ""  # 也别继续攒了，白占内存
+                return out
+            i += 1
+
+        self._pos = i
+        return out
+
+
 def repair_truncated_json(text: str) -> str | None:
     """把被 max_tokens 截断的 JSON 补完整，救不回来则返回 None。
 
