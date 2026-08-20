@@ -1,23 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render } from '@testing-library/react'
+import { cleanup, fireEvent, render } from '@testing-library/react'
 import type { ChapterBrief } from '@/lib/types'
+import SectionTree from './SectionTree'
 
 /**
- * 学习路径图的渲染管线测试。
+ * 学习路径的渲染。
  *
- * 这张图是学习者打开课程看到的第一样东西，它一空白，整个课程页就等于废了。
- * 而「有数据但画布空白」在 cytoscape 上出现过三次（容器塌成宽×0、
- * zoom 被算成 0、异常被吞掉），每次都因为空白和「真没数据」长得一模一样
- * 而排查很久。所以这里钉住两条：
- *   1. 没有小节时安静地什么都不渲染（不是留一个空壳容器）
- *   2. 初始化失败时必须把错误显示出来
+ * 这是学习者打开课程看到的第一样东西，它一乱、一空，整个课程页就废了。
+ * 前两版画在 canvas 上，测试只能验证「初始化没抛异常」——真正要紧的
+ * 「文字有没有显示、进度对不对」根本测不到（canvas 里没有 DOM）。
+ * 改成 HTML 之后这些才第一次变得可测，所以这里直接断言看得见的东西。
  */
-
-// jsdom 没有 canvas 2d 上下文，cytoscape 初始化必然抛错 ——
-// 正好拿它验证错误捕获路径
-HTMLCanvasElement.prototype.getContext = vi.fn().mockReturnValue(null) as never
-
-import SectionTree, { sectionGridPositions } from './SectionTree'
 
 /** 两章四节：1.1 → 1.2 有依赖，2.1 跨章依赖 1.1，2.2 无前置 */
 const CHAPTERS: ChapterBrief[] = [
@@ -84,14 +77,10 @@ const CHAPTERS: ChapterBrief[] = [
 ]
 
 describe('SectionTree', () => {
-  // 这个文件里 render 了多次；不清理的话上一次的 DOM 还挂着，
-  // 按文本查询会撞上「找到多个元素」
   afterEach(cleanup)
 
   it('没有小节时什么都不渲染（大纲还没出来的阶段）', () => {
-    const { container } = render(
-      <SectionTree chapters={[]} onSelect={() => {}} />,
-    )
+    const { container } = render(<SectionTree chapters={[]} onSelect={() => {}} />)
     expect(container.firstChild).toBeNull()
   })
 
@@ -101,50 +90,67 @@ describe('SectionTree', () => {
     expect(container.firstChild).toBeNull()
   })
 
-  it('画布初始化失败时把错误显示出来，而不是一片空白', async () => {
-    const { findByText } = render(
+  it('每个小节的标题都显示出来（不是只有编号）', () => {
+    const { getByText } = render(<SectionTree chapters={CHAPTERS} onSelect={() => {}} />)
+    for (const t of ['什么是注意力', 'QKV 的来历', '多头注意力', '位置编码']) {
+      expect(getByText(t)).toBeTruthy()
+    }
+  })
+
+  it('阶段头显示章名和该章进度', () => {
+    const { getByText } = render(<SectionTree chapters={CHAPTERS} onSelect={() => {}} />)
+    expect(getByText('基础')).toBeTruthy()
+    expect(getByText('深入')).toBeTruthy()
+    // 第 1 章 2 节学完 1 节，第 2 章一节都没学
+    expect(getByText('1/2')).toBeTruthy()
+    expect(getByText('0/2')).toBeTruthy()
+  })
+
+  it('小节编号按「章.节」显示', () => {
+    const { getByText } = render(<SectionTree chapters={CHAPTERS} onSelect={() => {}} />)
+    for (const n of ['1.1', '1.2', '2.1', '2.2']) {
+      expect(getByText(n)).toBeTruthy()
+    }
+  })
+
+  it('点小节回调它的 id', () => {
+    const onSelect = vi.fn()
+    const { getByText } = render(<SectionTree chapters={CHAPTERS} onSelect={onSelect} />)
+    fireEvent.click(getByText('多头注意力'))
+    expect(onSelect).toHaveBeenCalledWith('s3')
+  })
+
+  it('悬停时把要点和前置说清楚（标题在方块里会被截断）', () => {
+    const { getByText, queryByText } = render(
+      <SectionTree chapters={CHAPTERS} onSelect={() => {}} />,
+    )
+    expect(queryByText(/需先学/)).toBeNull()
+
+    fireEvent.mouseEnter(getByText('QKV 的来历'))
+    // 前置必须翻成人看得懂的名字，不能是 id
+    expect(getByText(/需先学：1\.1 什么是注意力/)).toBeTruthy()
+    expect(queryByText('s1')).toBeNull()
+  })
+
+  it('悬停已学完的小节会说明状态与卡片数', () => {
+    const { getByText } = render(<SectionTree chapters={CHAPTERS} onSelect={() => {}} />)
+    fireEvent.mouseEnter(getByText('什么是注意力'))
+    expect(getByText(/已学完/)).toBeTruthy()
+    expect(getByText(/2 张卡/)).toBeTruthy()
+  })
+
+  it('activeId 的小节被标成「下一步」', () => {
+    const { getByText } = render(
       <SectionTree chapters={CHAPTERS} activeId="s2" onSelect={() => {}} />,
     )
-    const title = await findByText('路径图渲染失败', undefined, { timeout: 4000 })
-    expect(title).toBeTruthy()
+    fireEvent.mouseEnter(getByText('QKV 的来历'))
+    expect(getByText(/下一步/)).toBeTruthy()
   })
 
-  it('图例把三种状态解释清楚（三个没有说明的颜色等于没有信息）', async () => {
-    const { findByText } = render(<SectionTree chapters={CHAPTERS} onSelect={() => {}} />)
-    expect(await findByText('未开始')).toBeTruthy()
-    expect(await findByText('读过')).toBeTruthy()
-    expect(await findByText('学完')).toBeTruthy()
-  })
-})
-
-/**
- * 网格坐标。
- *
- * 这张图刻意不跑自动布局 —— dagre 在 44% 屏宽的容器里会把 20 多个带标题的
- * 方块挤成一团（真实数据上试过，没法看）。改成一章一行的确定性网格之后，
- * 「位置可预测」就是它唯一的卖点，所以必须钉死。
- */
-describe('sectionGridPositions', () => {
-  it('一章一行：同章小节的 y 相同', () => {
-    const p = sectionGridPositions(CHAPTERS)
-    expect(p['s1'].y).toBe(p['s2'].y)
-    expect(p['s3'].y).toBe(p['s4'].y)
-  })
-
-  it('章按顺序往下排', () => {
-    const p = sectionGridPositions(CHAPTERS)
-    expect(p['s3'].y).toBeGreaterThan(p['s1'].y)
-  })
-
-  it('章内小节从左到右，且各章对齐成列', () => {
-    const p = sectionGridPositions(CHAPTERS)
-    expect(p['s2'].x).toBeGreaterThan(p['s1'].x)
-    // 每章的第一节都在同一列 —— 对齐是「整齐」的全部来源
-    expect(p['s3'].x).toBe(p['s1'].x)
-    expect(p['s4'].x).toBe(p['s2'].x)
-  })
-
-  it('没有小节时返回空对象', () => {
-    expect(sectionGridPositions([])).toEqual({})
+  it('图例把三种状态解释清楚（三个没有说明的颜色等于没有信息）', () => {
+    const { getByText } = render(<SectionTree chapters={CHAPTERS} onSelect={() => {}} />)
+    expect(getByText('未开始')).toBeTruthy()
+    expect(getByText('读过')).toBeTruthy()
+    expect(getByText('学完')).toBeTruthy()
   })
 })

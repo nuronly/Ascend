@@ -286,11 +286,13 @@ export default function CoursePage() {
 
   return (
     <div className="h-full flex flex-col lg:flex-row">
-      {/* ── 左：学习路径图 ── */}
+      {/* ── 左：学习路径 ── */}
       <div
         className={cn(
-          'shrink-0 relative border-[var(--border)] lg:w-[44%] lg:h-full lg:border-r lg:border-b-0',
-          treeOpen ? 'h-[280px] border-b' : 'h-0 overflow-hidden',
+          'shrink-0 bg-[var(--bg-sunken)] border-[var(--border)]',
+          // 列表形态不需要半屏那么宽；也给个上限，免得宽屏上左栏空一大片
+          'lg:w-[38%] lg:min-w-[300px] lg:max-w-[440px] lg:h-full lg:border-r lg:border-b-0',
+          treeOpen ? 'h-[320px] border-b' : 'h-0 overflow-hidden',
         )}
       >
         <SectionTree
@@ -316,7 +318,7 @@ export default function CoursePage() {
         >
           <path d="m6 9 6 6 6-6" />
         </svg>
-        {treeOpen ? '收起路径图' : '展开路径图'}
+        {treeOpen ? '收起学习路径' : '展开学习路径'}
       </button>
 
       {/* ── 右：课程详情 ── */}
