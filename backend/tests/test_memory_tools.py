@@ -71,12 +71,21 @@ def _card(**kw) -> Card:
 
 
 class FakeScope:
-    """记忆工具只用 get / one_or_none / all / select / session.execute。"""
+    """记忆工具只用 get / one_or_none / all / select / session.execute / scalars。"""
 
-    def __init__(self, *, note: Card | None = None, cards: list[Card] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        note: Card | None = None,
+        cards: list[Card] | None = None,
+        sections: list[tuple] | None = None,
+        noted: set[str] | None = None,
+    ) -> None:
         self.user_id = "u1"
         self._note = note
         self._cards = cards or []
+        self._sections = sections or []
+        self._noted = noted or set()
         self.session = self  # type: ignore[assignment]
 
     # ── scope 接口 ──
@@ -106,11 +115,17 @@ class FakeScope:
 
     # ── session 接口（小节结构查询走它）──
     async def execute(self, _stmt):
+        rows = list(self._sections)
+
         class _R:
             def all(self_inner):
-                return []
+                return rows
 
         return _R()
+
+    async def scalars(self, _stmt):
+        """哪几节有笔记。"""
+        return list(self._noted)
 
 
 def _run(tool, **kw):
@@ -216,6 +231,46 @@ class Test检索记忆:
         assert "检索词为空" in r.summary
 
 
+class Test小节命中要如实说有没有笔记:
+    """★ 路由层给错指引，比不给指引更浪费。
+
+    这条是在服务器上真跑一次笔记生成时发现的：原来对每一个小节命中都写
+    「可用 read_note 读他这一节的笔记」，模型老实照做，连着拿回三次
+    「这一节还没有笔记」—— 三次注定落空的工具调用，占掉了本该用来
+    读真有内容那一节的轮次。
+    """
+
+    def _search(self, *, noted: set[str]):
+        sec = Section(id="s1", chapter_id="ch1", idx=0, title="为什么需要注意力", summary="长程依赖")
+        ch = Chapter(id="ch1", course_id="co1", idx=0, title="入门")
+        co = Course(id="co1", user_id="u1", topic="Transformer", title="Transformer 入门")
+        scope = FakeScope(sections=[(sec, ch, co)], noted=noted)
+        tool = mem.SearchMemory(scope)
+
+        async def fake_retrieve(_scope, _query, **_kw):
+            return []
+
+        import app.services.brain as brain
+
+        real = brain.retrieve
+        brain.retrieve = fake_retrieve  # type: ignore[assignment]
+        try:
+            return _run(tool, query="注意力", kind="section")
+        finally:
+            brain.retrieve = real  # type: ignore[assignment]
+
+    def test_有笔记才给_read_note_的入口(self):
+        r = self._search(noted={"s1"})
+        assert "可用 read_note 读全文" in r.content
+        assert "section_id=s1" in r.content
+
+    def test_没笔记就明确说不必读(self):
+        r = self._search(noted=set())
+        assert "不必 read_note" in r.content
+        # 连 section_id 都不给：给了模型就会去试
+        assert "section_id=s1" not in r.content
+
+
 class Test工具契约:
     def test_四个工具都齐(self):
         names = {t.name for t in mem.memory_tools(FakeScope())}  # type: ignore[arg-type]
@@ -278,7 +333,13 @@ class Test场景化子集:
 # ─────────────────────────────────────────────────────────────
 def _独立运行() -> int:
     ok = failed = 0
-    for cls in (Test读笔记, Test检索记忆, Test工具契约, Test场景化子集):
+    for cls in (
+        Test读笔记,
+        Test检索记忆,
+        Test小节命中要如实说有没有笔记,
+        Test工具契约,
+        Test场景化子集,
+    ):
         inst = cls()
         for name in sorted(n for n in dir(inst) if n.startswith("test_")):
             try:

@@ -130,11 +130,19 @@ class SearchMemory:
                 )
 
         if kind in ("any", "section"):
-            for sec, ch, co in await self._sections(query):
+            for sec, ch, co, has_note in await self._sections(query):
+                # ★ 有没有笔记必须如实说。原来对每一节都写「可用 read_note 读」，
+                #   模型照做，连着拿回三次「这一节还没有笔记」—— 服务器上真跑
+                #   一次就看见了。路由层给错指引，比不给指引更浪费
+                hint = (
+                    f"section_id={sec.id}（他这一节写过笔记，可用 read_note 读全文）"
+                    if has_note
+                    else "（这一节他没写过笔记，不必 read_note）"
+                )
                 lines.append(
                     f"[课程小节] {co.title or co.topic} / {ch.idx + 1}.{sec.idx + 1} {sec.title}\n"
                     f"  要点：{(sec.summary or '')[:_ABSTRACT]}\n"
-                    f"  section_id={sec.id}（可用 read_note 读他这一节的笔记）"
+                    f"  {hint}"
                 )
                 display["items"].append(
                     {"id": sec.id, "kind": "section", "title": sec.title[:80], "section_id": sec.id}
@@ -157,12 +165,15 @@ class SearchMemory:
             display=display,
         )
 
-    async def _sections(self, query: str) -> list[tuple[Section, Chapter, Course]]:
+    async def _sections(self, query: str) -> list[tuple[Section, Chapter, Course, bool]]:
         """小节结构走关键词匹配就够。
 
         一门课几十个小节、每节标题加要点不过百字，数据量小到不值得建向量索引；
         而课程结构恰恰是**最该被查到**的东西 —— 它带着章节递进与前置依赖，
         是这套系统里唯一结构化的知识顺序。
+
+        最后一个布尔是「这一节有没有笔记」：多一句 SQL，换掉模型好几次
+        注定落空的 read_note。
         """
         from app.search.tokenize import tokenize
 
@@ -172,15 +183,31 @@ class SearchMemory:
             like = f"%{t}%"
             conds += [Section.title.like(like), Section.summary.like(like)]
 
-        rows = await self._scope.session.execute(
-            select(Section, Chapter, Course)
-            .join(Chapter, Chapter.id == Section.chapter_id)
-            .join(Course, Course.id == Chapter.course_id)
-            .where(Course.user_id == self._scope.user_id, or_(*conds))
-            .order_by(Chapter.idx, Section.idx)
-            .limit(6)
+        rows = list(
+            (
+                await self._scope.session.execute(
+                    select(Section, Chapter, Course)
+                    .join(Chapter, Chapter.id == Section.chapter_id)
+                    .join(Course, Course.id == Chapter.course_id)
+                    .where(Course.user_id == self._scope.user_id, or_(*conds))
+                    .order_by(Chapter.idx, Section.idx)
+                    .limit(6)
+                )
+            ).all()
         )
-        return list(rows.all())
+        if not rows:
+            return []
+
+        noted = set(
+            await self._scope.session.scalars(
+                self._scope.select(Card, Card.source_section_id).where(
+                    Card.kind == KIND_NOTE,
+                    Card.state != STATE_ARCHIVED,
+                    Card.source_section_id.in_([s.id for s, _, _ in rows]),
+                )
+            )
+        )
+        return [(s, ch, co, s.id in noted) for s, ch, co in rows]
 
 
 class ReadNote:
