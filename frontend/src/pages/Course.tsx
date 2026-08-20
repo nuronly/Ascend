@@ -286,13 +286,14 @@ export default function CoursePage() {
 
   return (
     <div className="h-full flex flex-col lg:flex-row">
-      {/* ── 左：学习路径 ── */}
+      {/* ── 左：学习路径树 ── */}
       <div
         className={cn(
           'shrink-0 bg-[var(--bg-sunken)] border-[var(--border)]',
-          // 列表形态不需要半屏那么宽；也给个上限，免得宽屏上左栏空一大片
-          'lg:w-[38%] lg:min-w-[300px] lg:max-w-[440px] lg:h-full lg:border-r lg:border-b-0',
-          treeOpen ? 'h-[320px] border-b' : 'h-0 overflow-hidden',
+          // 带连线的树需要横向空间：一层挤 5~6 个节点时会到 800px 上下，
+          // 放不下的部分交给容器自己横向滚动（图本来就是可以拖着看的）
+          'lg:w-[46%] lg:min-w-[340px] lg:max-w-[580px] lg:h-full lg:border-r lg:border-b-0',
+          treeOpen ? 'h-[340px] border-b' : 'h-0 overflow-hidden',
         )}
       >
         <SectionTree

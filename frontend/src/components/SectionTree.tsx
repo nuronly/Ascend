@@ -1,23 +1,22 @@
 import { useMemo, useState } from 'react'
 import type { ChapterBrief, SectionBrief } from '@/lib/types'
+import { NODE_H, NODE_W, computeTreeLayout } from '@/lib/treeLayout'
 import { cn } from '@/lib/utils'
 
 /**
- * 学习路径 —— 课程页左栏。
+ * 学习路径树 —— 课程页左栏。
  *
- * 形状就是这门课的推进过程：一个阶段一个阶段往下走，阶段里是几个小节。
- * 学完一节点亮一块，一眼看到「学什么、走到哪了、下一步是哪」。
+ * 从上往下一层一层走，箭头是前置依赖：分叉表示「学完这个可以往两个方向走」，
+ * 汇聚表示「这几样都懂了才能学下一个」。学完一节点亮一块。
  *
- * ── 为什么不用 cytoscape ───────────────────────────────────
- * 前两版分别用 dagre 自动分层和确定性网格画在 canvas 上，都不好看。
- * 根因不是布局参数，是**载体选错了**：canvas 上文字会跟着 fit 一起缩放
- * （28 个小节挤在半屏里，字号掉到 9px），一章小节多了只能挤不能换行，
- * 纵向滚动还得靠拖拽。
+ * ── 为什么是 HTML + SVG，而不是 cytoscape ───────────────────
+ * 前两版画在 canvas 上，都不好看，反复调参之后确认根因是载体：
+ * canvas 上文字跟着 fit 一起缩放（28 个小节挤进半屏，字号掉到 9px），
+ * 节点多了只能挤，滚动还得靠拖拽。
  *
- * 换成 HTML 之后这些全都消失了：文字永远是 11.5px 清晰的，
- * 一章小节再多也会自动折行，阶段多了就是原生纵向滚动。
- * 依赖关系不画连线（20 多条线穿插在方块之间只会添乱），改成悬停时
- * 直接告诉你「需先学：XXX」—— 文字比连线准确得多。
+ * 拆开之后各归其位：分层与同层排序是纯计算（lib/treeLayout），
+ * 节点用 HTML（文字永远清晰、能放完整标题），连线用 SVG（贝塞尔曲线，
+ * 汇聚处并成一束）。容器双向原生滚动。
  */
 
 interface Props {
@@ -40,182 +39,181 @@ const STATE_LABEL: Record<State, string> = {
   pending: '还没开始',
 }
 
-/** 浮层宽度。写成常量是因为要用它做右边界避让 */
 const TIP_W = 232
+const PAD = 18
 
 export default function SectionTree({ chapters, activeId, onSelect, className }: Props) {
-  // ★ 浮层用 fixed + 实际坐标，不能用 absolute：这个容器是 overflow-y-auto，
-  //   absolute 的浮层在靠底部的小节上会被直接裁掉一半
+  // ★ 浮层用 fixed + 实际坐标，不能用 absolute：容器是滚动容器，
+  //   absolute 浮层在靠底部的节点上会被裁掉一半
   const [hover, setHover] = useState<{ id: string; x: number; y: number } | null>(null)
 
-  /** id → 小节 + 它所属的章 + 已翻好名字的前置列表 */
+  const layout = useMemo(() => computeTreeLayout(chapters), [chapters])
+
+  /** id → 小节 / 所属章 / 已翻成名字的前置。浮层和高亮都要用 */
   const index = useMemo(() => {
     const titleOf = new Map<string, string>()
-    for (const ch of chapters) {
-      for (const s of ch.sections) titleOf.set(s.id, `${ch.idx + 1}.${s.idx + 1} ${s.title}`)
+    for (const n of layout.nodes) {
+      titleOf.set(n.id, `${n.chapter.idx + 1}.${n.section.idx + 1} ${n.section.title}`)
     }
-    const m = new Map<string, { s: SectionBrief; ch: ChapterBrief; prereqs: string[] }>()
-    for (const ch of chapters) {
-      for (const s of ch.sections) {
-        m.set(s.id, {
-          s,
-          ch,
-          prereqs: (s.prerequisite_ids ?? [])
-            .map((p) => titleOf.get(p))
-            .filter((t): t is string => !!t),
-        })
-      }
+    const m = new Map<string, { node: (typeof layout.nodes)[number]; prereqs: string[] }>()
+    for (const n of layout.nodes) {
+      m.set(n.id, {
+        node: n,
+        prereqs: (n.section.prerequisite_ids ?? [])
+          .map((p) => titleOf.get(p))
+          .filter((t): t is string => !!t),
+      })
     }
     return m
-  }, [chapters])
+  }, [layout])
 
-  const total = useMemo(() => chapters.reduce((n, ch) => n + ch.sections.length, 0), [chapters])
+  /** 悬停时点亮整条前置链（不只是直接前置）—— 「要学这一节，得先学完这些」 */
+  const litIds = useMemo(() => {
+    if (!hover) return new Set<string>()
+    const parents = new Map<string, string[]>()
+    for (const n of layout.nodes) {
+      parents.set(
+        n.id,
+        (n.section.prerequisite_ids ?? []).filter((p) => index.has(p)),
+      )
+    }
+    const out = new Set<string>([hover.id])
+    const stack = [hover.id]
+    while (stack.length) {
+      for (const p of parents.get(stack.pop()!) ?? []) {
+        if (out.has(p)) continue
+        out.add(p)
+        stack.push(p)
+      }
+    }
+    return out
+  }, [hover, layout, index])
 
-  if (!total) return null
+  if (!layout.nodes.length) return null
 
   const tip = hover ? index.get(hover.id) : undefined
 
   return (
-    <div className={cn('overflow-y-auto', className)}>
-      <div className="px-4 py-4 pb-10">
-        {chapters.map((ch, ci) => {
-          const done = ch.sections.filter((s) => s.completed).length
-          const allDone = done === ch.sections.length && done > 0
+    <div className={cn('overflow-auto', className)}>
+      <div
+        className="relative"
+        style={{
+          width: layout.width + PAD * 2,
+          height: layout.height + PAD * 2 + 34, // 给底部图例留位置
+        }}
+      >
+        {/* ── 连线 ── */}
+        <svg
+          className="tree-edges absolute pointer-events-none"
+          style={{ left: PAD, top: PAD, width: layout.width, height: layout.height }}
+          width={layout.width}
+          height={layout.height}
+          aria-hidden
+        >
+          {layout.edges.map((e) => {
+            // 只有当边的两端都在高亮链上时才算「这一条」被点亮，
+            // 否则悬停一个节点会把它前置的所有旁支也一起点亮，反而更花
+            const lit = litIds.has(e.from) && litIds.has(e.to)
+            return (
+              <path
+                key={e.id}
+                d={e.d}
+                fill="none"
+                stroke={lit ? 'var(--accent)' : 'var(--border-strong)'}
+                strokeWidth={lit ? 1.8 : 1.1}
+                opacity={hover ? (lit ? 1 : 0.25) : 0.75}
+                className="transition-all duration-150"
+              />
+            )
+          })}
+        </svg>
+
+        {/* ── 节点 ── */}
+        {layout.nodes.map((n) => {
+          const s = n.section
+          const st = stateOf(s)
+          const isNext = s.id === activeId
+          const lit = litIds.has(s.id)
+          const dim = !!hover && !lit
 
           return (
-            <div key={ch.id} className="relative">
-              {/* 阶段之间的竖线：把「一个阶段接一个阶段」画出来。
-                  最后一个阶段不画，否则线拖在下面成了断头路 */}
-              {ci < chapters.length - 1 && (
-                <span
-                  className="absolute left-[10px] top-[22px] bottom-[-6px] w-[1.5px] bg-[var(--border)]"
-                  aria-hidden
-                />
+            <button
+              key={s.id}
+              onClick={() => onSelect(s.id)}
+              onMouseEnter={(e) => {
+                const r = e.currentTarget.getBoundingClientRect()
+                setHover({ id: s.id, x: r.left, y: r.bottom + 6 })
+              }}
+              onMouseLeave={() => setHover(null)}
+              style={{ left: n.x + PAD, top: n.y + PAD, width: NODE_W, height: NODE_H }}
+              className={cn(
+                'absolute flex items-center gap-1.5 px-2 rounded-[7px] border text-left',
+                'transition-all duration-150',
+                st === 'done' &&
+                  'bg-[color-mix(in_oklch,var(--sem-ok)_13%,transparent)] border-[color-mix(in_oklch,var(--sem-ok)_45%,transparent)]',
+                st === 'ready' &&
+                  'bg-[color-mix(in_oklch,var(--accent)_11%,transparent)] border-[color-mix(in_oklch,var(--accent)_38%,transparent)]',
+                st === 'pending' && 'bg-[var(--bg)] border-dashed border-[var(--border-strong)]',
+                isNext && 'ring-2 ring-[var(--accent)] ring-offset-1 ring-offset-[var(--bg-sunken)]',
+                lit && 'border-[var(--accent)]',
+                dim && 'opacity-35',
               )}
-
-              {/* ── 阶段头 ── */}
-              <div className="relative flex items-center gap-2.5">
-                <span
-                  className={cn(
-                    'relative z-10 size-5 shrink-0 grid place-items-center rounded-full',
-                    'text-[10.5px] font-semibold tabular-nums transition-colors duration-200',
-                    allDone
-                      ? 'bg-[var(--sem-ok)] text-white'
-                      : done > 0
-                        ? 'bg-[var(--accent)] text-white'
-                        : 'bg-[var(--bg-sunken)] border border-[var(--border-strong)] text-[var(--text-subtle)]',
-                  )}
-                >
-                  {allDone ? (
-                    <svg viewBox="0 0 24 24" className="size-3" fill="none" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="m5 13 4 4L19 7" />
-                    </svg>
-                  ) : (
-                    ch.idx + 1
-                  )}
-                </span>
-
-                <span className="text-[12.5px] font-semibold tracking-[-0.01em] min-w-0 truncate">
-                  {ch.title}
-                </span>
-                <span className="ml-auto shrink-0 text-[10.5px] text-[var(--text-subtle)] tabular-nums">
-                  {done}/{ch.sections.length}
-                </span>
-              </div>
-
-              {/* ── 阶段里的小节：自动折行，一章多少节都放得下 ── */}
-              <div className="flex flex-wrap gap-1.5 ml-[30px] mt-2 mb-5">
-                {ch.sections.map((s) => {
-                  const st = stateOf(s)
-                  const isNext = s.id === activeId
-                  const hasPrereq = !!index.get(s.id)?.prereqs.length
-
-                  return (
-                    <button
-                      key={s.id}
-                      onClick={() => onSelect(s.id)}
-                      onMouseEnter={(e) => {
-                        const r = e.currentTarget.getBoundingClientRect()
-                        setHover({ id: s.id, x: r.left, y: r.bottom + 6 })
-                      }}
-                      onMouseLeave={() => setHover(null)}
-                      className={cn(
-                        'flex items-center gap-1.5 max-w-[190px] px-2 py-[5px]',
-                        'rounded-[7px] border text-left transition-all duration-200',
-                        'hover:-translate-y-[1px]',
-                        st === 'done' &&
-                          'bg-[color-mix(in_oklch,var(--sem-ok)_13%,transparent)] border-[color-mix(in_oklch,var(--sem-ok)_45%,transparent)]',
-                        st === 'ready' &&
-                          'bg-[color-mix(in_oklch,var(--accent)_11%,transparent)] border-[color-mix(in_oklch,var(--accent)_38%,transparent)]',
-                        st === 'pending' &&
-                          'border-dashed border-[var(--border-strong)] hover:bg-[var(--bg-hover)]',
-                        isNext && 'ring-2 ring-[var(--accent)] ring-offset-1 ring-offset-[var(--bg)]',
-                      )}
-                    >
-                      <span className="font-mono text-[10px] text-[var(--text-subtle)] tabular-nums shrink-0">
-                        {ch.idx + 1}.{s.idx + 1}
-                      </span>
-                      <span
-                        className={cn(
-                          'text-[11.5px] leading-tight min-w-0 truncate',
-                          st === 'done' ? 'text-[var(--text-muted)]' : 'text-[var(--text)]',
-                        )}
-                      >
-                        {s.title}
-                      </span>
-                      {st === 'done' && (
-                        <svg viewBox="0 0 24 24" className="size-3 shrink-0 text-[var(--sem-ok)]" fill="none" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round">
-                          <path d="m5 13 4 4L19 7" />
-                        </svg>
-                      )}
-                      {/* 有前置的给个记号，提示这里悬停能看到依赖 */}
-                      {hasPrereq && st !== 'done' && (
-                        <span
-                          className="size-1 rounded-full bg-[var(--text-subtle)] shrink-0 opacity-60"
-                          aria-hidden
-                        />
-                      )}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
+            >
+              <span className="font-mono text-[10px] text-[var(--text-subtle)] tabular-nums shrink-0">
+                {n.chapter.idx + 1}.{s.idx + 1}
+              </span>
+              <span
+                className={cn(
+                  'text-[11.5px] leading-tight min-w-0 truncate',
+                  st === 'done' ? 'text-[var(--text-muted)]' : 'text-[var(--text)]',
+                )}
+              >
+                {s.title}
+              </span>
+              {st === 'done' && (
+                <svg viewBox="0 0 24 24" className="size-3 shrink-0 text-[var(--sem-ok)]" fill="none" stroke="currentColor" strokeWidth="3.4" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="m5 13 4 4L19 7" />
+                </svg>
+              )}
+            </button>
           )
         })}
 
-        {/* 图例：三种状态不解释就是三种没意义的颜色 */}
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 ml-[30px] pt-3 border-t border-[var(--border)] text-[10px] text-[var(--text-subtle)]">
+        {/* ── 图例 ── 三种状态不解释就是三种没意义的颜色 */}
+        <div
+          className="absolute flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-[var(--text-subtle)]"
+          style={{ left: PAD, top: layout.height + PAD + 12 }}
+        >
           <Chip label="未开始" />
           <Chip label="读过" tone="accent" />
           <Chip label="学完" tone="ok" />
-          <span className="opacity-70">悬停看要点与前置</span>
+          <span className="opacity-70">连线 = 前置 · 悬停看整条链</span>
         </div>
       </div>
 
-      {/* 悬停浮层。标题在方块里会被截断，摘要和前置也只能在这儿说清楚 */}
+      {/* 悬停浮层：标题在节点里会被截断，要点和前置也只能在这儿说清楚 */}
       {tip && hover && (
         <div
           className="fixed z-50 px-3 py-2 rounded-[9px] bg-[var(--bg-raised)] border border-[var(--border)] shadow-[var(--shadow-pop)] pointer-events-none"
           style={{
             width: TIP_W,
-            // 靠右侧的小节要往左避让，否则浮层会顶出窗口
             left: Math.max(8, Math.min(hover.x, window.innerWidth - TIP_W - 8)),
             top: hover.y,
           }}
         >
-          <div className="text-[12px] font-semibold leading-snug">{tip.s.title}</div>
+          <div className="text-[12px] font-semibold leading-snug">{tip.node.section.title}</div>
           <div className="text-[10.5px] text-[var(--text-subtle)] mt-0.5">
-            第 {tip.ch.idx + 1} 章 · {tip.ch.title}
+            第 {tip.node.chapter.idx + 1} 章 · {tip.node.chapter.title}
           </div>
-          {tip.s.summary && (
+          {tip.node.section.summary && (
             <div className="text-[11.5px] text-[var(--text-muted)] mt-1 leading-relaxed line-clamp-3">
-              {tip.s.summary}
+              {tip.node.section.summary}
             </div>
           )}
           <div className="text-[10.5px] text-[var(--text-subtle)] mt-1.5">
-            {STATE_LABEL[stateOf(tip.s)]}
-            {tip.s.id === activeId && ' · 下一步'}
-            {tip.s.card_count > 0 && ` · ${tip.s.card_count} 张卡`}
+            {STATE_LABEL[stateOf(tip.node.section)]}
+            {tip.node.section.id === activeId && ' · 下一步'}
+            {tip.node.section.card_count > 0 && ` · ${tip.node.section.card_count} 张卡`}
           </div>
           {!!tip.prereqs.length && (
             <div className="text-[10.5px] text-[var(--text-muted)] mt-1.5 pt-1.5 border-t border-[var(--border)] leading-relaxed">

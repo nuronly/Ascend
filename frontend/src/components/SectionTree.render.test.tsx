@@ -4,12 +4,13 @@ import type { ChapterBrief } from '@/lib/types'
 import SectionTree from './SectionTree'
 
 /**
- * 学习路径的渲染。
+ * 学习路径树的渲染。
  *
  * 这是学习者打开课程看到的第一样东西，它一乱、一空，整个课程页就废了。
- * 前两版画在 canvas 上，测试只能验证「初始化没抛异常」——真正要紧的
- * 「文字有没有显示、进度对不对」根本测不到（canvas 里没有 DOM）。
- * 改成 HTML 之后这些才第一次变得可测，所以这里直接断言看得见的东西。
+ * 早先画在 canvas 上，测试只能验证「初始化没抛异常」——真正要紧的
+ * 「文字有没有显示、连线有没有画对」根本测不到（canvas 里没有 DOM）。
+ * 改成 HTML 节点 + SVG 连线之后这些才变得可测，所以这里直接断言
+ * 看得见的东西。分层与坐标的正确性在 lib/treeLayout.test.ts。
  */
 
 /** 两章四节：1.1 → 1.2 有依赖，2.1 跨章依赖 1.1，2.2 无前置 */
@@ -97,13 +98,21 @@ describe('SectionTree', () => {
     }
   })
 
-  it('阶段头显示章名和该章进度', () => {
-    const { getByText } = render(<SectionTree chapters={CHAPTERS} onSelect={() => {}} />)
-    expect(getByText('基础')).toBeTruthy()
-    expect(getByText('深入')).toBeTruthy()
-    // 第 1 章 2 节学完 1 节，第 2 章一节都没学
-    expect(getByText('1/2')).toBeTruthy()
-    expect(getByText('0/2')).toBeTruthy()
+  // 注意查 .tree-edges 而不是 svg path：「学完」的对勾也是 svg path
+  it('依赖被画成连线', () => {
+    const { container } = render(<SectionTree chapters={CHAPTERS} onSelect={() => {}} />)
+    // s2 依赖 s1、s3 依赖 s1 —— 两条线，从 s1 分叉出去
+    expect(container.querySelectorAll('.tree-edges path').length).toBe(2)
+  })
+
+  it('没有任何依赖时不画线，但节点照常显示', () => {
+    const noDeps = CHAPTERS.map((ch) => ({
+      ...ch,
+      sections: ch.sections.map((s) => ({ ...s, prerequisite_ids: [] })),
+    }))
+    const { container, getByText } = render(<SectionTree chapters={noDeps} onSelect={() => {}} />)
+    expect(container.querySelectorAll('.tree-edges path').length).toBe(0)
+    expect(getByText('多头注意力')).toBeTruthy()
   })
 
   it('小节编号按「章.节」显示', () => {
