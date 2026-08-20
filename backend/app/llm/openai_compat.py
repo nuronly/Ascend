@@ -94,6 +94,7 @@ class OpenAICompatProvider:
         max_tokens: int | None,
         json_mode: bool,
         tools: list[dict[str, Any]] | None = None,
+        extra: dict[str, Any] | None = None,
     ) -> dict:
         body: dict = {
             "model": model,
@@ -109,6 +110,13 @@ class OpenAICompatProvider:
             # auto 而不是 required：让模型自己判断要不要查。
             # 强制它每次都调一遍工具，它就会为了交差硬编一个查询词。
             body["tool_choice"] = "auto"
+        if extra:
+            # ★ 原样透传的请求体字段。存在的唯一理由是「关掉思考」：
+            #   各家关思考的开关名完全不统一（enable_thinking / thinking /
+            #   reasoning_effort / chat_template_kwargs …），而某些场景
+            #   （如概念地图这种纯枚举）用推理模型会白等一百秒。
+            #   与其在这里猜哪个名字对，不如让调用方按实测结果配。
+            body.update(extra)
         return body
 
     @staticmethod
@@ -136,8 +144,11 @@ class OpenAICompatProvider:
         json_mode: bool = False,
         tools: list[dict[str, Any]] | None = None,
         timeout: float | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> LLMResult:
-        body = self._payload(messages, model, temperature, max_tokens, json_mode, tools)
+        body = self._payload(
+            messages, model, temperature, max_tokens, json_mode, tools, extra_body
+        )
         try:
             resp = await self._get_client().post(
                 "/chat/completions", json=body, timeout=timeout or settings.llm_timeout_seconds
@@ -186,8 +197,11 @@ class OpenAICompatProvider:
         json_mode: bool = False,
         tools: list[dict[str, Any]] | None = None,
         timeout: float | None = None,
+        extra_body: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamChunk]:
-        body = self._payload(messages, model, temperature, max_tokens, json_mode, tools)
+        body = self._payload(
+            messages, model, temperature, max_tokens, json_mode, tools, extra_body
+        )
         body["stream"] = True
         # 有些兼容网关默认不回 usage，显式索要
         body["stream_options"] = {"include_usage": True}
