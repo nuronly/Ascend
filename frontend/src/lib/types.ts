@@ -148,7 +148,10 @@ export type CardState = 'draft' | 'vault' | 'archived'
 
 export interface Card {
   id: string
+  /** card = 划词卡；note = 一节汇流成的笔记卡（永久笔记） */
+  kind?: 'card' | 'note'
   question: string
+  /** 笔记卡用它存 AI 原稿快照，用户改过之后仍然保留 */
   ai_answer: string
   user_note: string
   is_rewritten: boolean

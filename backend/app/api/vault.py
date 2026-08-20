@@ -37,13 +37,23 @@ async def list_vault(
     course_id: str | None = None,
     rewritten: bool | None = None,
     has_children: bool | None = None,
+    kind: str | None = Query(None, pattern="^(card|note)$"),
     sort: str = Query("recent", pattern="^(recent|oldest|touched|depth)$"),
     limit: int = Query(50, le=200),
     offset: int = Query(0, ge=0),
 ) -> dict:
+    """仓库列表。
+
+    ★ 这里**不默认过滤 kind**：笔记卡（一节汇流成的永久笔记）本身就是知识资产，
+      收进仓库后必须能在仓库里找到，否则用户点了「收进仓库」就再也见不到它。
+      与卡片空间那张画布相反 —— 那里默认排除笔记卡，因为它会搅乱追问树。
+      需要只看笔记时传 kind=note。
+    """
     stmt = scope.select(Card)
     if state != "all":
         stmt = stmt.where(Card.state == state)
+    if kind:
+        stmt = stmt.where(Card.kind == kind)
     if rewritten is not None:
         stmt = stmt.where(Card.is_rewritten.is_(rewritten))
     if course_id:

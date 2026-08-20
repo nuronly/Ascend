@@ -8,7 +8,7 @@ import { Markdown } from '@/components/Markdown'
 import { cn, relativeTime, futureTime, truncate } from '@/lib/utils'
 import { toast } from '@/lib/store'
 
-type Tab = 'vault' | 'draft' | 'orphans'
+type Tab = 'vault' | 'draft' | 'notes' | 'orphans'
 
 export default function VaultPage() {
   const nav = useNavigate()
@@ -29,10 +29,12 @@ export default function VaultPage() {
     queryFn: () => {
       if (tab === 'orphans') return api.get<{ cards: Card[]; hint: string }>('/vault/orphans')
       const p = new URLSearchParams({
-        state: tab === 'vault' ? 'vault' : 'draft',
+        // 笔记这一栏连草稿一起给 —— 「生成了但还没收进仓库」的那些最需要被找回
+        state: tab === 'notes' ? 'all' : tab === 'vault' ? 'vault' : 'draft',
         sort,
         limit: '100',
       })
+      if (tab === 'notes') p.set('kind', 'note')
       if (q.trim()) p.set('q', q.trim())
       if (rewrittenOnly) p.set('rewritten', 'true')
       return api.get<{ total: number; cards: Card[] }>(`/vault?${p}`)
@@ -139,6 +141,7 @@ export default function VaultPage() {
           options={[
             { value: 'vault', label: '已沉淀' },
             { value: 'draft', label: '未整理' },
+            { value: 'notes', label: '笔记' },
             { value: 'orphans', label: '孤岛卡' },
           ]}
         />
@@ -224,10 +227,20 @@ export default function VaultPage() {
                   )}
                 >
                   <div className="flex items-center gap-1.5">
-                    <span className="text-[13.5px] font-medium text-[var(--accent)] truncate">
-                      ⟨{c.selected_text || truncate(c.question, 20)}⟩
-                    </span>
+                    {c.kind === 'note' ? (
+                      // 笔记卡是「永久笔记」，比划词卡高一个层级，标题也就照它自己的样子来
+                      <span className="text-[13.5px] font-medium truncate">
+                        📓 {c.question || c.selected_text}
+                      </span>
+                    ) : (
+                      <span className="text-[13.5px] font-medium text-[var(--accent)] truncate">
+                        ⟨{c.selected_text || truncate(c.question, 20)}⟩
+                      </span>
+                    )}
                     <div className="grow" />
+                    {c.kind === 'note' && c.state !== 'vault' && (
+                      <Badge className="shrink-0">草稿</Badge>
+                    )}
                     {due && (
                       <Badge tone="due" className="shrink-0">
                         待复习
@@ -236,7 +249,10 @@ export default function VaultPage() {
                   </div>
 
                   <div className="text-[12.5px] text-[var(--text-muted)] mt-1.5 line-clamp-3 leading-relaxed">
-                    {c.summary || c.question || truncate(c.ai_answer, 140)}
+                    {/* 笔记卡的正文在 user_note（终稿）或 ai_answer（原稿）里 */}
+                    {c.kind === 'note'
+                      ? truncate((c.user_note || c.ai_answer).replace(/^#+\s.*$/gm, '').trim(), 140)
+                      : c.summary || c.question || truncate(c.ai_answer, 140)}
                   </div>
 
                   {!!c.concept_tags.length && (
@@ -285,7 +301,13 @@ export default function VaultPage() {
         open={!!detail}
         onClose={() => setDetail(null)}
         width="max-w-2xl"
-        title={detail ? `⟨${detail.selected_text || truncate(detail.question, 24)}⟩` : ''}
+        title={
+          detail
+            ? detail.kind === 'note'
+              ? `📓 ${detail.question || detail.selected_text}`
+              : `⟨${detail.selected_text || truncate(detail.question, 24)}⟩`
+            : ''
+        }
         subtitle={
           detail && (
             <span className="flex flex-wrap items-center gap-2">
@@ -335,7 +357,25 @@ export default function VaultPage() {
           )
         }
       >
-        {detail && (
+        {detail?.kind === 'note' ? (
+          /* ★ 笔记卡：正文就是笔记本身。
+             它没有问答轮次，内容在 user_note（你的终稿）或 ai_answer（AI 原稿）里 ——
+             照原来的问答排版走会渲染成一片空白。 */
+          <div className="space-y-4">
+            <Markdown variant="read">{detail.user_note || detail.ai_answer}</Markdown>
+            {detail.is_rewritten && detail.ai_answer && detail.user_note && (
+              <details className="pt-2 border-t border-[var(--border)]">
+                <summary className="text-[12px] text-[var(--text-muted)] cursor-pointer">
+                  看看 AI 原来写的
+                </summary>
+                <div className="mt-3 opacity-70">
+                  <Markdown variant="read">{detail.ai_answer}</Markdown>
+                </div>
+              </details>
+            )}
+          </div>
+        ) : (
+          detail && (
           <div className="space-y-4">
             {detail.context_text && (
               <blockquote className="text-[12.5px] text-[var(--text-muted)] leading-relaxed border-l-2 border-[var(--border-strong)] pl-3">
@@ -380,6 +420,7 @@ export default function VaultPage() {
               </div>
             )}
           </div>
+          )
         )}
       </Modal>
     </div>

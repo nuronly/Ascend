@@ -20,6 +20,16 @@ export default function CoursePage() {
     queryFn: () => api.get<Course>(`/courses/${courseId}`),
   })
 
+  /** 哪几节已经有笔记卡 —— 课程页是回看笔记最自然的入口 */
+  const { data: notes } = useQuery({
+    queryKey: ['course-notes', courseId],
+    queryFn: () =>
+      api.get<{ notes: Record<string, { card_id: string; state: string; edited: boolean }> }>(
+        `/courses/${courseId}/notes`,
+      ),
+    enabled: !!courseId,
+  })
+
   /* ── 大纲流式生成（PLAN §3.1）──
      旗舰模型设计一门课要两分钟以上，同步等 = 白屏两分半。
      这里逐章推送已经定下来的标题，让等待可见、可预期。 */
@@ -317,6 +327,23 @@ export default function CoursePage() {
                           <Badge tone="accent" className="shrink-0">
                             {s.card_count} 卡
                           </Badge>
+                        )}
+                        {notes?.notes?.[s.id] && (
+                          <span
+                            title={
+                              notes.notes[s.id].state === 'vault'
+                                ? '这一节的笔记已收进仓库'
+                                : '这一节有笔记草稿，还没收进仓库'
+                            }
+                            className={cn(
+                              'shrink-0 text-[10.5px] px-1.5 py-[1px] rounded-[4px]',
+                              notes.notes[s.id].state === 'vault'
+                                ? 'bg-[color-mix(in_oklch,var(--sem-ok)_14%,transparent)] text-[var(--sem-ok)]'
+                                : 'bg-[var(--bg-sunken)] text-[var(--text-muted)]',
+                            )}
+                          >
+                            📓 笔记{notes.notes[s.id].state === 'vault' ? '' : '·草稿'}
+                          </span>
                         )}
                       </div>
                       {s.summary && (
