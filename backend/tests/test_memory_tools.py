@@ -242,10 +242,43 @@ class Test工具契约:
             assert getattr(t, "_scope") is scope
 
 
+class Test场景化子集:
+    """★ 能零成本塞进 prompt 的信息，别拿一轮工具调用去换。
+
+    每次工具调用都是一次完整的模型往返（正文一轮十几秒）。给模型一件用不上的
+    工具，它有不小概率去调 —— 白烧一轮。所以各场景只拿自己真需要的那几件。
+    """
+
+    def test_正文不给_read_outline(self):
+        """章节顺序与前置依赖已经零成本拼进 prompt 了，再给一件是重复的。"""
+        assert "read_outline" not in mem.SECTION_TOOLS
+        assert "read_note" in mem.SECTION_TOOLS
+        assert "my_boundary" in mem.SECTION_TOOLS  # 边界跨课程，course.boundary 只有本课那份
+
+    def test_笔记只往回看自己的记录(self):
+        """笔记是他自己的总结。掺进外部内容，半年后重读只会疑惑
+        「这句是我想的还是它抄的」。"""
+        assert set(mem.NOTE_TOOLS) == {"search_memory", "read_note"}
+        assert "web_search" not in mem.NOTE_TOOLS
+
+    def test_按名字裁剪(self):
+        got = mem.memory_tools(FakeScope(), only=mem.NOTE_TOOLS)  # type: ignore[arg-type]
+        assert [t.name for t in got] == ["search_memory", "read_note"]
+
+    def test_名字写错当场炸_而不是静默少一件(self):
+        """名字是模型看到的契约。拼错了静默返回空列表，表现成「它从来不查记忆」。"""
+        try:
+            mem.memory_tools(FakeScope(), only=("read_notes",))  # type: ignore[arg-type]
+        except ValueError as exc:
+            assert "read_notes" in str(exc)
+        else:
+            raise AssertionError("拼错的工具名被放过了")
+
+
 # ─────────────────────────────────────────────────────────────
 def _独立运行() -> int:
     ok = failed = 0
-    for cls in (Test读笔记, Test检索记忆, Test工具契约):
+    for cls in (Test读笔记, Test检索记忆, Test工具契约, Test场景化子集):
         inst = cls()
         for name in sorted(n for n in dir(inst) if n.startswith("test_")):
             try:

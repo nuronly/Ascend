@@ -12,7 +12,8 @@ import { SelectionPopover } from '@/components/SelectionPopover'
 import { useSelection, findAnchor } from '@/components/useSelection'
 import { PomodoroPill } from '@/components/Pomodoro'
 import NotePanel from '@/components/NotePanel'
-import RunTimeline, { ResourceList, type ToolStep } from '@/components/RunTimeline'
+import RunTimeline, { ResourceList } from '@/components/RunTimeline'
+import { settleStep, toolStep, type ToolStep } from '@/lib/tools'
 import { Badge, Button, Spinner, Tip } from '@/components/ui'
 import { cn } from '@/lib/utils'
 
@@ -111,22 +112,13 @@ export default function SectionPage() {
             // 只留尾部，免得 DOM 跟着上万字的推理一起长
             if (data?.text) setThinkingText((t) => (t + data.text).slice(-4000))
           }
+          // 联网核实，以及「读我上一节的笔记 / 看我的已知边界」——
+          // 这一段是用户唯一能看出「它确实认识我」的地方，必须摊开
           if (ev === 'tool_call') {
-            setTools((t) => [
-              ...t,
-              { name: data?.name ?? '', query: data?.detail ?? '', state: 'running' },
-            ])
+            setTools((t) => [...t, toolStep(data?.name ?? '', data?.detail)])
           }
-          // 结果回填到最后一条 running 上：工具是串行执行的，不会错位
           if (ev === 'tool_result' || ev === 'tool_error') {
-            const ok = ev === 'tool_result'
-            setTools((t) =>
-              t.map((s, i) =>
-                i === t.length - 1
-                  ? { ...s, state: ok ? 'done' : 'error', detail: data?.detail, items: data?.items ?? [] }
-                  : s,
-              ),
-            )
+            setTools((t) => settleStep(t, ev === 'tool_result', data))
           }
         },
         onDone: () => {

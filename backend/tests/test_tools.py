@@ -24,7 +24,7 @@ if str(_BACKEND) not in sys.path:
 
 import httpx  # noqa: E402
 
-from app.llm.base import Message, ToolCall  # noqa: E402
+from app.llm.base import Message, StreamChunk, ToolCall, ToolEvent  # noqa: E402
 from app.llm.openai_compat import OpenAICompatProvider  # noqa: E402
 from app.llm.tools import ToolResult, tool_specs  # noqa: E402
 from app.llm.tools.search import WebSearch, _rank, authority, resource_kind  # noqa: E402
@@ -210,6 +210,86 @@ class Test工具描述:
         assert "只在确实需要" in fn["description"]
 
 
+class Test轮次上限:
+    """tool loop 的每一轮都是一次完整的模型往返。
+
+    推理模型每轮从头再想一遍，所以一轮的代价不是「一次 DB 查询」而是几十秒 +
+    一份完整历史的 token。全局上限是按大纲那种「值得多找几轮资料」定的；
+    正文与笔记要的是尽快开始讲，必须能自己压低上界 —— 而且**最后一轮
+    绝不能再带工具**，否则模型会一直「再查一次看看」，始终不产出正文。
+    """
+
+    def _loop(self, max_rounds: int | None) -> tuple[int, int]:
+        """返回（模型往返次数, 工具真正执行次数）。"""
+        from app.llm import router
+
+        trips = {"n": 0}
+        ran = {"n": 0}
+
+        async def fake_round(convo, sink, **kw):
+            trips["n"] += 1
+            if kw.get("specs"):  # 还带着工具 → 假装它又要调一次
+                sink["calls"] = [ToolCall(id=f"c{trips['n']}", name="t", arguments="{}")]
+                return
+            yield StreamChunk(done=True)
+
+        async def fake_run_tool(call, _tools, **_kw):
+            ran["n"] += 1
+            return "工具结果", ToolEvent(phase="result", name=call.name, detail="ok")
+
+        async def no_budget(*_a, **_kw):
+            return None
+
+        real = (router._stream_round, router._run_tool, router.check_budget)
+        router._stream_round = fake_round  # type: ignore[assignment]
+        router._run_tool = fake_run_tool  # type: ignore[assignment]
+        router.check_budget = no_budget  # type: ignore[assignment]
+
+        class _T:
+            name = "t"
+            description = "d"
+
+            def schema(self):
+                return {"type": "object", "properties": {}}
+
+            async def run(self, **_kw):
+                return ToolResult(content="x")
+
+        async def go():
+            async for _ in router.stream_chat(
+                [Message(role="user", content="hi")],
+                scene="test",
+                tools=[_T()],
+                max_rounds=max_rounds,
+            ):
+                pass
+
+        try:
+            asyncio.run(go())
+        finally:
+            router._stream_round, router._run_tool, router.check_budget = real  # type: ignore[assignment]
+        return trips["n"], ran["n"]
+
+    def test_压到两轮就必须收敛到正文(self):
+        trips, ran = self._loop(2)
+        # 两轮带工具 + 最后一轮不带工具 = 3 次往返，工具执行 2 次
+        assert (trips, ran) == (3, 2)
+
+    def test_不传时走全局上限(self):
+        from app.core.config import settings
+
+        trips, ran = self._loop(None)
+        assert ran == settings.tool_max_rounds
+        assert trips == settings.tool_max_rounds + 1
+
+    def test_压不过全局上限(self):
+        """调用方只能往下压，不能借这个参数把预算闸抬上去。"""
+        from app.core.config import settings
+
+        _, ran = self._loop(settings.tool_max_rounds + 99)
+        assert ran == settings.tool_max_rounds
+
+
 def _独立运行() -> int:
     import inspect
     import traceback
@@ -221,6 +301,7 @@ def _独立运行() -> int:
         Test来源判定,
         Test搜索失败不拖垮生成,
         Test工具描述,
+        Test轮次上限,
     ):
         print(f"\n{cls.__name__}")
         inst = cls()

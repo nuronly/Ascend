@@ -6,7 +6,8 @@ import type { Course } from '@/lib/types'
 import { LEVEL_LABELS } from '@/lib/types'
 import { Badge, Button, Progress, Spinner } from '@/components/ui'
 import SectionTree from '@/components/SectionTree'
-import RunTimeline, { ResourceList, type ToolStep } from '@/components/RunTimeline'
+import RunTimeline, { ResourceList } from '@/components/RunTimeline'
+import { settleStep, toolStep, type ToolStep } from '@/lib/tools'
 import { cn } from '@/lib/utils'
 import { toast } from '@/lib/store'
 
@@ -63,26 +64,10 @@ export default function CoursePage() {
             if (data?.text) setThinkingText((t) => (t + data.text).slice(-4000))
           }
           if (ev === 'tool_call') {
-            setTools((t) => [
-              ...t,
-              { name: data?.name ?? '', query: data?.detail ?? '', state: 'running' },
-            ])
+            setTools((t) => [...t, toolStep(data?.name ?? '', data?.detail)])
           }
-          // 结果回填到最后一条 running 上：工具是串行执行的，不会错位
           if (ev === 'tool_result' || ev === 'tool_error') {
-            const ok = ev === 'tool_result'
-            setTools((t) =>
-              t.map((s, i) =>
-                i === t.length - 1
-                  ? {
-                      ...s,
-                      state: ok ? 'done' : 'error',
-                      detail: data?.detail,
-                      items: data?.items ?? [],
-                    }
-                  : s,
-              ),
-            )
+            setTools((t) => settleStep(t, ev === 'tool_result', data))
           }
         },
         onDone: () => {

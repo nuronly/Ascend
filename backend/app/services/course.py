@@ -23,6 +23,7 @@ from app.llm import (
     stream_chat,
 )
 from app.llm.tools import available_tools
+from app.llm.tools.memory import SECTION_TOOLS, memory_tools
 from app.models.course import (
     COURSE_FAILED,
     COURSE_READY,
@@ -33,7 +34,7 @@ from app.models.course import (
     Course,
     Section,
 )
-from app.services import calibrate, prompts
+from app.services import calibrate, note, prompts
 
 log = logging.getLogger(__name__)
 
@@ -118,6 +119,8 @@ def _tool_sse(ev, found: dict[str, dict]) -> dict:
         return {"event": "tool_call", "data": {"name": ev.name, "detail": ev.detail}}
     if ev.phase == "result":
         _collect_found(ev.payload, found)
+        # 只列有 url 的：记忆工具的命中也叫 items，但那是笔记与小节，
+        # 照搬过来前端会渲染出一串 href="" 的死链接
         items = [
             {
                 "title": it.get("title", ""),
@@ -127,6 +130,7 @@ def _tool_sse(ev, found: dict[str, dict]) -> dict:
                 "authority": it.get("authority", 0),
             }
             for it in (ev.payload.get("items") or [])[:6]
+            if it.get("url")
         ]
         return {
             "event": "tool_result",
@@ -407,6 +411,26 @@ async def _prev_section_titles(scope: UserScope, course_id: str, section: Sectio
     return [t for ci, si, t in rows if (ci, si) < cur_key]
 
 
+async def _prereq_titles(scope: UserScope, course_id: str, section: Section) -> list[str]:
+    """本节的前置小节标题。
+
+    prerequisite_ids 是大纲阶段就定下的**知识顺序**，是这套系统里唯一结构化的
+    依赖关系。它和「已学过的小节」不是一回事：后者是一串按时间排的标题，
+    前者说的是「这一节踩在哪几节身上」—— 那几节的内容可以直接引用不必重讲。
+    """
+    ids = [str(x) for x in (section.prerequisite_ids or [])][:6]
+    if not ids:
+        return []
+    rows = await scope.session.execute(
+        select(Chapter.idx, Section.idx, Section.title)
+        .join(Section, Section.chapter_id == Chapter.id)
+        # 限定在本课程内：prerequisite_ids 是模型填的，跨课程的脏 id 不该被信任
+        .where(Chapter.course_id == course_id, Section.id.in_(ids))
+        .order_by(Chapter.idx, Section.idx)
+    )
+    return [f"{ci + 1}.{si + 1} {t}" for ci, si, t in rows]
+
+
 async def stream_section_content(
     scope: UserScope,
     section_id: str,
@@ -441,7 +465,12 @@ async def stream_section_content(
         section.regenerate_count += 1
     await scope.commit()
 
+    # ★ 这一节要接住的东西，全部零成本地先摊在 prompt 里：讲过什么、踩在谁
+    #   身上、哪几节他写过笔记。工具只留给「读那一节笔记的全文」——
+    #   原则见 llm/tools/memory.py：索引用于发现，工具用于引用。
     prev = await _prev_section_titles(scope, course.id, section)
+    prereq = await _prereq_titles(scope, course.id, section)
+    prior_notes = await note.note_routes(scope, course.id, upto=section.id)
     user_msg = prompts.section_user(
         course_title=course.title,
         chapter_title=chapter.title,
@@ -454,6 +483,8 @@ async def stream_section_content(
         # 正文这层最容易翻车的两件事：把他已经会的又讲一遍、假定他会某个
         # 其实没接触过的词。边界能同时挡住两头
         boundary=calibrate.as_any(course.boundary),
+        prereq_titles=prereq,
+        prior_notes=prior_notes,
     )
 
     yield {"event": "start", "data": {"section_id": section.id, "title": section.title}}
@@ -473,7 +504,13 @@ async def stream_section_content(
             temperature=0.7,
             max_tokens=16000,  # 推理模型思维链占额度，与大纲一致放宽
             quota=quota,
-            tools=available_tools(),
+            # 联网核实 + 记忆（读他前面那节的笔记、看已知边界、翻别的课）。
+            # 这是「第二大脑无处不在」真正落地的地方：不是侧栏里一个要专门
+            # 想起来的入口，而是每一次讲解都先看一眼他手里已经有什么
+            tools=[*available_tools(), *memory_tools(scope, only=SECTION_TOOLS)],
+            # 路由信息已经在 prompt 里了，正常只需要一轮「读那一节笔记」。
+            # 留 2 轮给「顺手再联网核实一个数字」，再多就是拿几十秒换边际收益
+            max_rounds=2,
         ):
             if chunk.done:
                 break

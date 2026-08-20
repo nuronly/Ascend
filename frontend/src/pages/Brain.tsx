@@ -8,7 +8,8 @@ import { reportGuideStep } from '@/lib/guide'
 import { useIsDark } from '@/lib/useTheme'
 import { Markdown } from '@/components/Markdown'
 import { NeuralNetwork, type NeuralHandle } from '@/components/NeuralNetwork'
-import RunTimeline, { type ToolStep } from '@/components/RunTimeline'
+import RunTimeline from '@/components/RunTimeline'
+import { settleStep, toolStep, type ToolStep } from '@/lib/tools'
 import { Badge, Button, Modal, Segmented, Spinner, Textarea } from '@/components/ui'
 import { cn, relativeTime, truncate } from '@/lib/utils'
 
@@ -34,14 +35,6 @@ const RECALL_LABEL: Record<string, { text: string; color: string }> = {
   vector: { text: '语义相近', color: '#6fa8ff' },
   graph: { text: '沿连接扩散', color: '#a78bfa' },
   fused: { text: '融合排序', color: '#c9d4ea' },
-}
-
-/** 记忆工具的人话名字。「它查了什么」是可解释性的核心，不该只显示函数名 */
-const MEMORY_TOOL_LABEL: Record<string, string> = {
-  search_memory: '再查一遍我的记录',
-  read_note: '读我那一节的笔记全文',
-  read_outline: '查这门课的大纲与前置依赖',
-  my_boundary: '看我的已知边界',
 }
 
 /** 画布上的浮层。之前写死成黑色药丸，浅底下像贴了块补丁 */
@@ -144,20 +137,10 @@ export default function BrainPage() {
         // ★ 记忆工具：预检索只给摘要，模型会自己去读笔记全文 / 大纲 / 已知边界。
         //   把这个过程摆出来 —— 「它查了什么」正是可解释性的核心
         if (ev === 'tool_call') {
-          setTools((t) => [
-            ...t,
-            { name: data?.name ?? '', query: MEMORY_TOOL_LABEL[data?.name] ?? data?.name ?? '', state: 'running' },
-          ])
+          setTools((t) => [...t, toolStep(data?.name ?? '', data?.detail)])
         }
         if (ev === 'tool_result' || ev === 'tool_error') {
-          const ok = ev === 'tool_result'
-          setTools((t) =>
-            t.map((s, i) =>
-              i === t.length - 1
-                ? { ...s, state: ok ? 'done' : 'error', detail: data?.detail }
-                : s,
-            ),
-          )
+          setTools((t) => settleStep(t, ev === 'tool_result', data))
         }
 
         if (ev === 'citations') {

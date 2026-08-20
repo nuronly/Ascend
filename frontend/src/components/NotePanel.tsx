@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, sse } from '@/lib/api'
 import { toast } from '@/lib/store'
+import { settleStep, toolStep, type ToolStep } from '@/lib/tools'
 import { Markdown } from '@/components/Markdown'
 import NoteEditor from '@/components/NoteEditor'
 import RunTimeline from '@/components/RunTimeline'
@@ -22,6 +23,9 @@ import { Button, Spinner } from '@/components/ui'
  *    模型慢就让中心的卡悬浮着，绝不把动画拉长充数。
  * 3. **AI 原稿与用户终稿分开**。原稿永远留着（可以随时「看看 AI 原来写的」），
  *    用户改的存 user_note。知道原版还在，他才敢大胆删改。
+ * 4. **它去读了哪几节旧笔记，要看得见**。「与前面学过的关系」那一节原来只能
+ *    靠模型瞎猜，现在它会真的去 read_note；把这个过程摆出来，用户才知道
+ *    那句关联不是编的。
  */
 
 interface NoteState {
@@ -61,6 +65,7 @@ export default function NotePanel({
   const [streamed, setStreamed] = useState('')
   const [thinking, setThinking] = useState(0)
   const [thinkingText, setThinkingText] = useState('')
+  const [tools, setTools] = useState<ToolStep[]>([])
 
   const [editing, setEditing] = useState(false)
   const [draftText, setDraftText] = useState('')
@@ -108,6 +113,7 @@ export default function NotePanel({
     setStreamed('')
     setThinking(0)
     setThinkingText('')
+    setTools([])
     setSources([])
     setFlying(false)
     setEditing(false)
@@ -136,6 +142,13 @@ export default function NotePanel({
         if (ev === 'thinking') {
           setThinking(data?.chars ?? 0)
           if (data?.text) setThinkingText((t) => (t + data.text).slice(-2000))
+        }
+        // 它去读了哪一节的旧笔记 —— 「与前面学过的关系」那一节的证据来源
+        if (ev === 'tool_call') {
+          setTools((t) => [...t, toolStep(data?.name ?? '', data?.detail)])
+        }
+        if (ev === 'tool_result' || ev === 'tool_error') {
+          setTools((t) => settleStep(t, ev === 'tool_result', data))
         }
         if (ev === 'delta' && typeof data?.text === 'string') {
           buf += data.text
@@ -270,14 +283,22 @@ export default function NotePanel({
         )}
 
         <div ref={bodyRef} className="grow min-h-0 overflow-y-auto px-4 py-4">
-          {streamed ? (
+          {/* 正文开始后不撤掉工具那一段：它可能中途再去读一份旧笔记，
+              而「读了 1.2 的笔记」正是「与前面学过的关系」那一节的出处 */}
+          {(!streamed || !!tools.length) && (
+            <RunTimeline
+              thinking={streamed ? 0 : thinking}
+              thinkingText={streamed ? '' : thinkingText}
+              tools={tools}
+              className={streamed ? 'mb-4 pb-3 border-b border-[var(--border)]' : undefined}
+            />
+          )}
+          {streamed && (
             <div className="stream-caret">
               <Markdown variant="read" streaming>
                 {streamed}
               </Markdown>
             </div>
-          ) : (
-            <RunTimeline thinking={thinking} thinkingText={thinkingText} tools={[]} />
           )}
         </div>
       </div>

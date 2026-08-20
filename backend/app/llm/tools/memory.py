@@ -28,6 +28,15 @@
   正文生成（「他学过 RNN，可以直接类比」）、笔记生成（带入相关旧笔记）、
   卡片问答（用他自己的话回答他）、建课校准（已知边界）——
   一旦记忆是工具，它就自动无处不在，而不是侧栏里一个要专门想起来的入口。
+
+★ 但工具不是白给的：每一次调用都是一轮完整的模型往返
+
+  所以有一条配套原则：**能零成本塞进 prompt 的路由信息就塞进去，
+  别拿一轮工具调用去换。** 「他哪几节写过笔记」是一句 SQL 的事，
+  直接列进 prompt（见 services/note.note_routes）；工具只留给
+  「按需取全文」这种又大又必须实时的事。
+
+  各场景因此只拿自己真需要的那几件（见 SECTION_TOOLS / NOTE_TOOLS）。
 """
 
 from __future__ import annotations
@@ -365,10 +374,37 @@ class MyBoundary:
         )
 
 
-def memory_tools(scope: UserScope) -> list[Tool]:
+# ─────────────────────────────────────────────────────────────
+# 场景化子集
+# ─────────────────────────────────────────────────────────────
+# 正文生成：大纲结构（前序小节、前置依赖）已经零成本拼进 prompt 了，
+# read_outline 是重复的；真正只能现场取的是「他那一节笔记的全文」与
+# 「他的已知边界」（边界横跨所有课程，course.boundary 只有本课那份）。
+SECTION_TOOLS = ("search_memory", "read_note", "my_boundary")
+
+# 笔记生成：只往回看自己的记录。
+# 刻意**不给 web_search** —— 笔记是他自己的总结，掺进外部新内容就变成
+# 「又一篇教程」，而且那部分他既没学过也没法核实，半年后重读只会疑惑
+# 「这句是我想的还是它抄的」。
+NOTE_TOOLS = ("search_memory", "read_note")
+
+
+def memory_tools(scope: UserScope, *, only: tuple[str, ...] = ()) -> list[Tool]:
     """构造这个用户的记忆工具集。
 
     工具带着 scope 走 —— 所有查询都过 scope.select()，与业务代码同一条数据
     访问通道，不存在「工具绕过用户隔离」的口子。
+
+    only 用来裁剪：给模型一件用不上的工具，它有不小的概率去调，白烧一轮
+    往返（正文一轮是十几秒）。所以各场景只拿自己真需要的那几件。
     """
-    return [SearchMemory(scope), ReadNote(scope), ReadOutline(scope), MyBoundary(scope)]
+    tools: list[Tool] = [SearchMemory(scope), ReadNote(scope), ReadOutline(scope), MyBoundary(scope)]
+    if only:
+        # 用名字过滤而不是让调用方自己拼列表：名字是模型看到的契约，
+        # 拼错了这里会当场少一件工具，比静默传错实例好查
+        picked = [t for t in tools if t.name in only]
+        unknown = set(only) - {t.name for t in tools}
+        if unknown:
+            raise ValueError(f"memory_tools(only=…) 里有不存在的工具名：{sorted(unknown)}")
+        return picked
+    return tools

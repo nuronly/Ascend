@@ -22,6 +22,13 @@
 
   自动生成的东西没人看。用户点了那一下，这份笔记的所有权才是他的。
   顺带也省下了每节一次的模型调用。
+
+★ 「与前面学过的关系」靠工具查证，不靠模型瞎猜
+
+  这一节原来是整张笔记里最虚的一块 —— 模型手里根本没有前面几节的任何信息，
+  于是要么省略，要么写出「与前文密切相关」这种占着位置的废话。
+  现在两条腿走：note_routes 零成本列出「他哪几节写过笔记」（发现），
+  read_note 让模型去读那一节的当前全文（引用）。查不到确切关联就省略。
 """
 
 from __future__ import annotations
@@ -29,12 +36,13 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, select
 
 from app.core.config import TIER_STANDARD
 from app.core.scope import UserScope
 from app.core.types import new_id, utcnow
 from app.llm import Message, ThinkingBuffer, stream_chat
+from app.llm.tools.memory import NOTE_TOOLS, memory_tools
 from app.models.card import KIND_CARD, KIND_NOTE, STATE_ARCHIVED, STATE_DRAFT, Card
 from app.services import calibrate, prompts
 
@@ -94,6 +102,82 @@ async def existing_note(scope: UserScope, section_id: str) -> Card | None:
     )
 
 
+async def note_routes(scope: UserScope, course_id: str, *, upto: str = "") -> list[dict]:
+    """他在这门课里已经写过笔记的小节 —— 给模型的「路由清单」。
+
+    ★ 为什么是清单而不是让模型自己 search_memory
+
+      每一次工具调用都是一轮完整的模型往返（正文一轮十几秒）。而「他哪几节
+      写过笔记」是一句 SQL 的事，几百字就能列完。所以这里零成本把**路由**
+      给足，工具只留给「读那一节的全文」——真正必须现场取、又大又会变的东西。
+      这正是「索引用于发现，工具用于引用」在 prompt 侧的对应做法。
+
+    ★ upto：只往回看
+
+      顺序即知识依赖。写 1.5 的笔记时去引用 2.3，既是剧透，也颠倒了他真实的
+      理解路径。所以只列排在这一节之前的（严格小于，本节自己也排除在外）。
+
+    ★ 一条 SQL 拿全
+
+      小节顺序与「这一节有没有笔记」本可以分两次查（后者 note_index 就有），
+      但那样 upto 的切分点和笔记归属要在两份结果之间对齐，多一处能错的地方。
+      外连接一次拿完，重复行在 Python 里按 section 收敛。
+    """
+    from app.models.course import Chapter, Section
+
+    rows = list(
+        (
+            await scope.session.execute(
+                select(
+                    Section.id,
+                    Section.title,
+                    Section.key_concepts,
+                    Chapter.idx,
+                    Section.idx,
+                    Card.id,
+                    Card.is_rewritten,
+                )
+                .join(Chapter, Chapter.id == Section.chapter_id)
+                .outerjoin(
+                    Card,
+                    and_(
+                        Card.source_section_id == Section.id,
+                        Card.user_id == scope.user_id,  # 隔离：连表也不能漏掉 owner
+                        Card.kind == KIND_NOTE,
+                        Card.state != STATE_ARCHIVED,
+                    ),
+                )
+                .where(Chapter.course_id == course_id)
+                # created_at 排最后：一节可能有多张笔记（「重新生成」会另建一张），
+                # 同 section 的行里最后一条就是最新那份
+                .order_by(Chapter.idx, Section.idx, Card.created_at)
+            )
+        ).all()
+    )
+
+    # section_id → 该节最新一张笔记的信息（缺键表示这节还没写）
+    seen: list[str] = []  # 全部小节，按大纲顺序（upto 的切分点在这上面找）
+    noted: dict[str, dict] = {}
+    for sid, title, concepts, ci, si, note_id, edited in rows:
+        key = str(sid)
+        if key not in seen:
+            seen.append(key)
+        if note_id:
+            noted[key] = {
+                "section_id": key,
+                "title": f"{int(ci) + 1}.{int(si) + 1} {title}",
+                "concepts": [str(c) for c in (concepts or [])][:4],
+                "edited": bool(edited),
+            }
+
+    if upto and upto in seen:
+        seen = seen[: seen.index(upto)]
+
+    out = [noted[k] for k in seen if k in noted]
+    # 只留最近的十节：整门课铺进 prompt 就成了噪声，而相邻的几节才是真有关系的
+    return out[-10:]
+
+
 async def stream_section_note(
     scope: UserScope, section_id: str, *, force: bool = False, quota: int | None = None
 ) -> AsyncIterator[dict]:
@@ -104,6 +188,7 @@ async def stream_section_note(
                粒子数就是真实卡片数，用户能数出「我的 7 张卡进去了」）
       cached   已有笔记卡且未强制重生成 —— 直接回放，进编辑态
       thinking 思维链原文（等待期间看得见它在想什么）
+      tool_*   它去读了哪一节的旧笔记（「与前面学过的关系」靠这个才写得实）
       delta    笔记正文
       done     card_id
     """
@@ -148,6 +233,10 @@ async def stream_section_note(
         cards=[_card_payload(c) for c in cards],
         # 开课时他说不会的概念，笔记里要确保覆盖
         unknown=[str(x) for x in (boundary.get("unknown") or [])][:12],
+        # ★ 「与前面学过的关系」那一节原来只能靠模型瞎猜 —— 它手里根本没有
+        #   前面几节的任何信息，于是要么省略，要么写出「与前文密切相关」这种废话。
+        #   现在给它一份路由清单（哪几节有笔记），让它自己 read_note 去查证。
+        prior_notes=await note_routes(scope, course.id, upto=section.id),
     )
 
     think = ThinkingBuffer()
@@ -164,11 +253,28 @@ async def stream_section_note(
             tier=TIER_STANDARD,
             user_id=scope.user_id,
             temperature=0.5,
-            max_tokens=8000,  # 思维链也吃这份额度
+            # 思维链吃这份额度，带工具的多轮往返也吃 —— 原来 8000 在
+            # 「先读两份旧笔记再写」的路径上会把正文挤没
+            max_tokens=12000,
             quota=quota,
+            tools=memory_tools(scope, only=NOTE_TOOLS),
+            # 「与前面的关系」最多需要读两份旧笔记。再多轮就是拿几十秒的等待
+            # 换一句可有可无的关联 —— 而用户此刻正盯着这一栏等笔记出来
+            max_rounds=2,
         ):
             if chunk.done:
                 break
+            # 它去读了哪一节的旧笔记，摊出来 —— 这是「关系」那一节的证据来源，
+            # 用户点开就知道这句话不是编的
+            if chunk.tool_event:
+                if pending := think.flush():
+                    yield pending
+                ev = chunk.tool_event
+                yield {
+                    "event": f"tool_{ev.phase}",
+                    "data": {"name": ev.name, "detail": ev.detail, "ms": ev.ms},
+                }
+                continue
             if chunk.reasoning:
                 if pending := think.add(chunk.reasoning):
                     yield pending

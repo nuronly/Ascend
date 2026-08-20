@@ -1,27 +1,21 @@
 import { useEffect, useRef } from 'react'
 import type { Resource } from '@/lib/types'
 import { RESOURCE_KIND_LABEL } from '@/lib/types'
+import type { ToolStep } from '@/lib/tools'
 import { Spinner } from '@/components/ui'
 import { cn } from '@/lib/utils'
 
 /**
  * 生成过程的执行时间线。
  *
- * 大纲要跑一两分钟，中间还夹着联网检索。如果这段时间只给一个转圈，
- * 用户完全无法判断是在干活还是卡死了 —— 等待的痛苦几乎全部来自
+ * 大纲要跑一两分钟，中间还夹着联网检索与「翻他自己的学习记录」。如果这段时间
+ * 只给一个转圈，用户完全无法判断是在干活还是卡死了 —— 等待的痛苦几乎全部来自
  * 「不知道还要多久、不知道在做什么」，而不是时长本身。
  *
- * 所以把每一步都摆出来：在想什么、在搜什么、搜到了什么、已经定下哪几章。
+ * 所以把每一步都摆出来：在想什么、在查什么、查到了什么、已经定下哪几章。
  */
 
-export interface ToolStep {
-  name: string
-  /** 给人看的查询词 */
-  query: string
-  state: 'running' | 'done' | 'error'
-  detail?: string
-  items?: Resource[]
-}
+export type { ToolStep }
 
 interface Props {
   thinking: number
@@ -63,7 +57,7 @@ export default function RunTimeline({
       )}
 
       {tools.map((t, i) => (
-        <div key={`${t.query}-${i}`}>
+        <div key={`${t.name}-${t.query}-${i}`}>
           <Row
             icon={
               t.state === 'running' ? (
@@ -80,9 +74,15 @@ export default function RunTimeline({
             }
             text={
               <>
-                <span className="text-[var(--text-muted)]">联网检索</span>
-                <span className="mx-1 opacity-40">·</span>
-                <span className="text-[var(--text)]">{t.query}</span>
+                {/* 动作名必须由调用方给：这里写死成「联网检索」的那一版，
+                    把「读我那一节的笔记全文」也标成了联网 */}
+                <span className="text-[var(--text-muted)]">{t.label ?? t.name}</span>
+                {!!t.query && (
+                  <>
+                    <span className="mx-1 opacity-40">·</span>
+                    <span className="text-[var(--text)]">{t.query}</span>
+                  </>
+                )}
               </>
             }
           />

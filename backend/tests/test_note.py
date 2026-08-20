@@ -10,6 +10,9 @@
   4. **己见要原样进 prompt**，并明确要求模型逐字照抄 —— 那是用户的思考，
      不是模型的素材。
   5. 汇流要**收敛**：提了 30 个问题的人不该得到 30 段摘要。
+  6. **「与前面学过的关系」必须有依据**：给模型一份「他哪几节写过笔记」的
+     路由清单 + read_note 工具，让它去查证；查不到就省略这一节。
+     一份笔记不给外部检索工具 —— 笔记是他自己的总结，不是又一篇教程。
 
 没装 pytest 也能跑：python tests/test_note.py
 """
@@ -17,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sys
 from pathlib import Path
 
@@ -25,7 +29,8 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 from app.core.types import utcnow  # noqa: E402
-from app.llm.base import StreamChunk  # noqa: E402
+from app.llm.base import StreamChunk, ToolEvent  # noqa: E402
+from app.llm.tools.memory import NOTE_TOOLS  # noqa: E402
 from app.models.card import (  # noqa: E402
     KIND_CARD,
     KIND_NOTE,
@@ -57,14 +62,25 @@ def _card(**kw) -> Card:
 
 
 class FakeScope:
-    """note 服务只用到 section_course / select / all / one_or_none / add / commit。"""
+    """note 服务用到 section_course / select / all / one_or_none / add / commit，
+    以及 session.execute（路由清单一条外连接拿完本课程的小节与笔记）。"""
 
-    def __init__(self, cards: list[Card], existing: Card | None = None) -> None:
+    def __init__(
+        self,
+        cards: list[Card],
+        existing: Card | None = None,
+        *,
+        routes: list[tuple] | None = None,
+    ) -> None:
         self.user_id = "u1"
         self._cards = cards
         self._existing = existing
         self.added: list[object] = []
         self.commits = 0
+        self.session = self  # type: ignore[assignment]
+        # note_routes 那条外连接的返回行：
+        # (section_id, title, key_concepts, chapter_idx, section_idx, note_id, edited)
+        self._routes = routes or []
 
         self.section = Section(
             id="s1",
@@ -100,6 +116,15 @@ class FakeScope:
     async def all(self, _stmt):
         return list(self._cards)
 
+    async def execute(self, _stmt):
+        rows = list(self._routes)
+
+        class _R:
+            def all(self_inner):
+                return rows
+
+        return _R()
+
     async def one_or_none(self, _stmt):
         return self._existing
 
@@ -116,11 +141,32 @@ class FakeScope:
 
 BODY = "## 这一节解决了什么问题\n点积注意力为什么要缩放。\n\n## 我的理解\n\n## 我还没搞懂的\n"
 
+_REAL_STREAM_SIG = inspect.signature(svc.stream_chat)
 
-def _fake_stream(body: str = BODY, *, reasoning: str = "", boom: Exception | None = None):
-    async def gen(*_a, **_kw):
+# 送进模型的两条消息与工具清单，供断言检查（替身把它们抄在这里）
+SENT: dict = {}
+
+
+def _fake_stream(
+    body: str = BODY,
+    *,
+    reasoning: str = "",
+    boom: Exception | None = None,
+    tool_calls: list[tuple[str, str]] | None = None,
+):
+    async def gen(*a, **kw):
+        _REAL_STREAM_SIG.bind(*a, **kw)  # 参数名写错要当场暴露，不能靠 **kwargs 兜住
+        SENT.clear()
+        SENT["messages"] = a[0] if a else kw.get("messages")
+        SENT["tools"] = kw.get("tools") or []
         if reasoning:
             yield StreamChunk(reasoning=reasoning)
+        # 模型先去读了旧笔记，再开始写 —— 这一步必须透出成 tool_* 事件
+        for name, detail in tool_calls or []:
+            yield StreamChunk(tool_event=ToolEvent(phase="call", name=name, detail=detail))
+            yield StreamChunk(
+                tool_event=ToolEvent(phase="result", name=name, detail=f"读了{detail}", ms=7)
+            )
         if boom is not None:
             raise boom
         for i in range(0, len(body), 9):
@@ -276,9 +322,115 @@ class Test送进模型的素材:
 
 
 # ─────────────────────────────────────────────────────────────
+# 路由清单：他前面哪几节写过笔记
+# ─────────────────────────────────────────────────────────────
+def _route_row(sid, title, ci, si, *, note_id=None, edited=False, concepts=("点积",)):
+    """note_routes 那条外连接的一行。"""
+    return (sid, title, list(concepts), ci, si, note_id, edited)
+
+
+class Test路由清单:
+    def _routes(self, rows, *, upto=""):
+        scope = FakeScope([], routes=rows)
+        return asyncio.run(svc.note_routes(scope, "co1", upto=upto))  # type: ignore[arg-type]
+
+    def test_只列有笔记的小节(self):
+        """没写笔记的小节列进去毫无用处 —— read_note 过去只会拿到「还没写」。"""
+        out = self._routes(
+            [
+                _route_row("s1", "为什么需要注意力", 0, 0, note_id="n1"),
+                _route_row("s2", "缩放点积", 0, 1),  # 没笔记
+            ]
+        )
+        assert [r["section_id"] for r in out] == ["s1"]
+        assert out[0]["title"] == "1.1 为什么需要注意力"
+
+    def test_upto_之后的一律不列(self):
+        """顺序即知识依赖。写 1.2 的笔记时引用 2.1，既是剧透也颠倒了理解路径。"""
+        out = self._routes(
+            [
+                _route_row("s1", "第一节", 0, 0, note_id="n1"),
+                _route_row("s2", "第二节", 0, 1, note_id="n2"),
+                _route_row("s3", "第三节", 1, 0, note_id="n3"),
+            ],
+            upto="s2",
+        )
+        assert [r["section_id"] for r in out] == ["s1"]
+
+    def test_一节多张笔记时取最新那份(self):
+        """「重新生成」会另建一张并排放着 —— 路由该指向最新的，不是最早的。"""
+        out = self._routes(
+            [
+                _route_row("s1", "第一节", 0, 0, note_id="old", edited=False),
+                _route_row("s1", "第一节", 0, 0, note_id="new", edited=True),
+            ]
+        )
+        assert len(out) == 1
+        assert out[0]["edited"] is True
+
+    def test_亲手改写过的要标出来(self):
+        rows = [_route_row("s1", "第一节", 0, 0, note_id="n1", edited=True)]
+        block = prompts.note_routes_block(self._routes(rows))
+        assert "亲手改写过" in block
+        assert "section_id=s1" in block  # 模型得知道拿什么去 read_note
+
+    def test_一份笔记都没有时明确禁止编关系(self):
+        """留空会让模型自作主张写一句「与前面学过的内容密切相关」。"""
+        block = prompts.note_routes_block([])
+        assert "还没有写过任何笔记" in block
+        assert "省略" in block
+
+
+class Test记忆工具接入笔记生成:
+    def _scope(self):
+        return FakeScope(
+            [_card()],
+            routes=[_route_row("s0", "上一节", 0, 0, note_id="n0", edited=True)],
+        )
+
+    def test_只给读记录的工具_不给联网(self):
+        """笔记是他自己的总结。掺进外部新内容，半年后重读只会疑惑
+        「这句是我想的还是它抄的」。"""
+        _run(self._scope())
+        names = {t.name for t in SENT["tools"]}
+        assert names == set(NOTE_TOOLS)
+        assert "web_search" not in names
+
+    def test_前面写过的笔记进了_prompt(self):
+        _run(self._scope())
+        user_msg = SENT["messages"][1].content
+        assert "1.1 上一节" in user_msg
+        assert "section_id=s0" in user_msg
+
+    def test_读旧笔记的过程要透出来(self):
+        """「与前面学过的关系」那一节的证据来源 —— 用户点开就知道不是编的。"""
+        ev = _run(
+            self._scope(),
+            stream=_fake_stream(tool_calls=[("read_note", "1.1 上一节")]),
+        )
+        assert _of(ev, "tool_call")[0]["name"] == "read_note"
+        assert "读了1.1 上一节" in _of(ev, "tool_result")[0]["detail"]
+        # 工具事件不能把正文吞掉
+        assert "".join(d["text"] for d in _of(ev, "delta")).startswith("## 这一节")
+
+    def test_工具带着本人的_scope_走(self):
+        """用户隔离不靠工具自觉：所有查询都过同一个 scope。"""
+        scope = self._scope()
+        _run(scope)
+        for t in SENT["tools"]:
+            assert getattr(t, "_scope") is scope
+
+
+# ─────────────────────────────────────────────────────────────
 def _独立运行() -> int:
     ok = failed = 0
-    for cls in (Test汇流优先级, Test生成, Test送进模型的素材):
+    for cls in (
+        Test汇流优先级,
+        Test生成,
+        Test送进模型的素材,
+        Test路由清单,
+        Test记忆工具接入笔记生成,
+    ):
         inst = cls()
         for name in sorted(n for n in dir(inst) if n.startswith("test_")):
             try:

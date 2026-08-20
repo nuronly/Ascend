@@ -730,17 +730,27 @@ async def stream_chat(
     quota: int | None = None,
     json_mode: bool = False,
     tools: list[Tool] | None = None,
+    max_rounds: int | None = None,
 ) -> AsyncIterator[StreamChunk]:
     """流式输出。等 30 秒白屏必流失（PLAN §3.1）。
 
     带 tools 时跑 tool loop：模型可以先检索再作答，中间每一步都以 ToolEvent
     透出（正在搜什么 / 搜到了什么）。大纲本来就要一两分钟，中间再插一次
     静默的联网检索，等待就彻底不可预期了 —— 所以过程必须可见。
+
+    ★ max_rounds：**每一轮 tool loop 都是一次完整的模型往返**
+
+      推理模型每轮都会从头再想一遍，所以一轮的代价不是「一次 DB 查询」而是
+      几十秒 + 一份完整历史的 token。全局上限（tool_max_rounds）是按大纲那种
+      「值得多找几轮资料」的场景定的；正文与笔记要的是尽快开始讲，
+      调用方可以在这里压低上界。
     """
     await check_budget(user_id, quota)
     specs = tool_specs(tools) if tools else None
     convo = list(messages)
-    rounds = settings.tool_max_rounds if tools else 0
+    rounds = min(settings.tool_max_rounds, max_rounds) if max_rounds else settings.tool_max_rounds
+    if not tools:
+        rounds = 0
 
     for round_no in range(rounds + 1):
         # 最后一轮不再给工具：必须收敛到正文。留着工具的话，模型往往会
