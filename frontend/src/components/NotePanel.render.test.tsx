@@ -94,7 +94,7 @@ describe('NotePanel', () => {
     await waitFor(() => expect(screen.getByText('先看他问过哪些问题')).toBeTruthy())
   })
 
-  it('已有草稿：显示未保存状态，并能一键保存进仓库', async () => {
+  it('已有草稿：显示未保存状态，并能一键收进仓库', async () => {
     get.mockResolvedValue({
       exists: true,
       card_id: 'n1',
@@ -108,12 +108,51 @@ describe('NotePanel', () => {
     view()
     await waitFor(() => expect(screen.getByText('草稿 · 未保存进仓库')).toBeTruthy())
 
-    fireEvent.click(screen.getByText('保存进笔记'))
-    // ★ 两步：写终稿 + 推进仓库
-    await waitFor(() => expect(patch).toHaveBeenCalledWith('/cards/n1/note', {
-      user_note: '## 核心机制\n缩放点积。',
-    }))
+    fireEvent.click(screen.getByText('收进仓库'))
+    // ★ 两步：写终稿 + 推进仓库（漏掉第二步，笔记进不了图谱/检索/复习）
+    await waitFor(() =>
+      expect(patch).toHaveBeenCalledWith('/cards/n1/note', {
+        user_note: '## 核心机制\n缩放点积。',
+      }),
+    )
     await waitFor(() => expect(post).toHaveBeenCalledWith('/cards/n1/vault', {}))
+  })
+
+  it('改一段就自动存 —— 长文让人手动点保存本身就是反人类的', async () => {
+    vi.useFakeTimers()
+    try {
+      get.mockResolvedValue({
+        exists: true,
+        card_id: 'n1',
+        content: '第一段。\n\n第二段。',
+        ai_draft: '第一段。\n\n第二段。',
+        state: 'vault',
+        edited: false,
+      })
+      patch.mockResolvedValue({ ok: true })
+      view()
+      await act(async () => {
+        await Promise.resolve()
+      })
+      fireEvent.click(screen.getByText('修改'))
+
+      // 点中第二段 → 只有它变成编辑框
+      fireEvent.click(screen.getByText('第二段。'))
+      const ta = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(ta, { target: { value: '第二段，我自己改的。' } })
+      fireEvent.blur(ta)
+
+      // 防抖 1.2s 后落库，正文里两段都要在（只改一块不能丢别的块）
+      expect(patch).not.toHaveBeenCalled()
+      await act(async () => {
+        vi.advanceTimersByTime(1300)
+      })
+      expect(patch).toHaveBeenCalledWith('/cards/n1/note', {
+        user_note: '第一段。\n\n第二段，我自己改的。',
+      })
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('改写后仍能翻出 AI 原稿 —— 知道原版还在才敢大改', async () => {

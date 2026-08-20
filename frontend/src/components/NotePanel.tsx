@@ -2,9 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, sse } from '@/lib/api'
 import { toast } from '@/lib/store'
 import { Markdown } from '@/components/Markdown'
+import NoteEditor from '@/components/NoteEditor'
 import RunTimeline from '@/components/RunTimeline'
 import { Button, Spinner } from '@/components/ui'
-import { cn } from '@/lib/utils'
 
 /**
  * ★ 本节笔记卡 —— 卢曼卡片盒缺失的最上层
@@ -62,10 +62,12 @@ export default function NotePanel({
   const [editing, setEditing] = useState(false)
   const [draftText, setDraftText] = useState('')
   const [saving, setSaving] = useState(false)
+  const [savedAt, setSavedAt] = useState<string>('')
   const [showAiDraft, setShowAiDraft] = useState(false)
 
   const abortRef = useRef<AbortController | null>(null)
   const bodyRef = useRef<HTMLDivElement>(null)
+  const saveTimer = useRef<number | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -155,18 +157,58 @@ export default function NotePanel({
     setEditing(true)
   }
 
-  /** 保存：先写终稿，再把 draft 推进 vault（进图谱、检索、复习）。
+  /** 写终稿。
    *
    *  ★ 文本必须由调用方显式传进来，不能读 draftText：
    *    「不进编辑态直接保存」那条路上 setState 还没生效，读到的会是空字符串，
    *    等于把用户终稿存成空的。自测当场抓到过这个。 */
-  const save = async (text: string) => {
+  const persist = useCallback(
+    async (text: string) => {
+      if (!note?.card_id) return
+      setSaving(true)
+      try {
+        await api.patch(`/cards/${note.card_id}/note`, { user_note: text })
+        setSavedAt(
+          new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }),
+        )
+      } catch (e: any) {
+        toast.error(e?.message ?? '保存失败')
+      } finally {
+        setSaving(false)
+      }
+    },
+    [note?.card_id],
+  )
+
+  /** 改一段就自动存一次（防抖 1.2s）。
+   *
+   *  长文让人手动点保存本身就是反人类的 —— 而且笔记是"以后还要回来改"的东西，
+   *  丢一次就再也不会有人往里写了。 */
+  const onEdit = useCallback(
+    (md: string) => {
+      setDraftText(md)
+      setNote((n) => (n ? { ...n, content: md, edited: true } : n))
+      if (saveTimer.current) window.clearTimeout(saveTimer.current)
+      saveTimer.current = window.setTimeout(() => void persist(md), 1200)
+    },
+    [persist],
+  )
+
+  useEffect(
+    () => () => {
+      if (saveTimer.current) window.clearTimeout(saveTimer.current)
+    },
+    [],
+  )
+
+  /** 收进仓库：这才是"进图谱 / 检索 / 复习"的那一步，和保存内容是两件事 */
+  const toVault = async (text: string) => {
     if (!note?.card_id) return
     setSaving(true)
     try {
       await api.patch(`/cards/${note.card_id}/note`, { user_note: text })
-      if (note.state === 'draft') await api.post(`/cards/${note.card_id}/vault`, {})
-      toast.ok('笔记已保存')
+      await api.post(`/cards/${note.card_id}/vault`, {})
+      toast.ok('笔记已收进仓库')
       setEditing(false)
       await load()
     } catch (e: any) {
@@ -291,46 +333,41 @@ export default function NotePanel({
           <span className="text-[11px] text-[var(--sem-rewritten,var(--accent))]">已改写</span>
         )}
         <div className="grow" />
-        {editing ? (
-          <>
-            <Button size="xs" variant="primary" onClick={() => save(draftText)} loading={saving}>
-              {note.state === 'draft' ? '保存进笔记' : '保存修改'}
-            </Button>
-            <Button size="xs" variant="ghost" onClick={() => setEditing(false)} disabled={saving}>
-              取消
-            </Button>
-          </>
+        {saving ? (
+          <span className="text-[11px] text-[var(--text-subtle)]">保存中…</span>
         ) : (
-          <>
-            <Button size="xs" variant="outline" onClick={startEdit}>
-              修改
-            </Button>
-            {note.state === 'draft' && (
-              <Button size="xs" variant="primary" onClick={() => save(body)} loading={saving}>
-                保存进笔记
-              </Button>
-            )}
-          </>
+          savedAt && <span className="text-[11px] text-[var(--text-subtle)]">已保存 {savedAt}</span>
+        )}
+        {editing ? (
+          <Button size="xs" variant="outline" onClick={() => setEditing(false)}>
+            完成
+          </Button>
+        ) : (
+          <Button size="xs" variant="outline" onClick={startEdit}>
+            修改
+          </Button>
+        )}
+        {note.state === 'draft' && (
+          <Button
+            size="xs"
+            variant="primary"
+            onClick={() => toVault(editing ? draftText : body)}
+            loading={saving}
+          >
+            收进仓库
+          </Button>
         )}
       </div>
 
       <div className="grow min-h-0 overflow-y-auto">
         {editing ? (
-          <div className="p-3">
-            {/* Markdown 源码直编：块粒度已经很小，textarea 足够 ——
-                引一个富文本编辑器要处理 schema/序列化/粘贴清洗，那是另一件事 */}
-            <textarea
-              value={draftText}
-              onChange={(e) => setDraftText(e.target.value)}
-              spellCheck={false}
-              className={cn(
-                'w-full min-h-[420px] resize-y p-3 rounded-[var(--radius)]',
-                'bg-[var(--bg)] border border-[var(--border)] focus:border-[var(--border-strong)]',
-                'outline-none text-[13px] leading-[1.85] font-mono',
-              )}
-            />
-            <div className="text-[11px] text-[var(--text-subtle)] mt-2 leading-relaxed">
-              「我的理解」「我还没搞懂的」两节是特意留空的 —— 那两处是这份笔记里最值钱的地方。
+          <div className="px-5 py-4">
+            {/* 点哪改哪：读的时候是排好的版，只有点中的那一段变成小编辑框 ——
+                不必面对整篇 ## 和 $O(n^2)$ 的源码 */}
+            <NoteEditor value={draftText} onChange={onEdit} />
+            <div className="text-[11px] text-[var(--text-subtle)] mt-5 leading-relaxed">
+              点任意一段就能改，改完点别处或按 Esc。「我的理解」「我还没搞懂的」两节是
+              特意留空的 —— 那两处是这份笔记里最值钱的地方。
             </div>
           </div>
         ) : (
