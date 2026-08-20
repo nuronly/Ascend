@@ -24,6 +24,7 @@ if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
 from app.llm.base import StreamChunk, ToolEvent  # noqa: E402
+from app.llm.openai_compat import _reasoning_of  # noqa: E402
 from app.models.course import Chapter, Course, Section  # noqa: E402
 from app.services import course as course_mod  # noqa: E402
 from app.services.course import _Thinking  # noqa: E402
@@ -81,6 +82,33 @@ class Test攒段:
         assert t.total == len(src)
         # 顺便确认真的压缩了事件数，否则攒段就白做了
         assert len(out) < len(src) / 20
+
+
+# ─────────────────────────────────────────────────────────────
+# 各家的字段名
+# ─────────────────────────────────────────────────────────────
+class Test思维链字段兼容:
+    def test_deepseek_的_reasoning_content(self):
+        assert _reasoning_of({"reasoning_content": "在想"}) == "在想"
+
+    def test_openrouter_的_reasoning_字符串(self):
+        assert _reasoning_of({"reasoning": "在想"}) == "在想"
+
+    def test_对象形态的_reasoning(self):
+        assert _reasoning_of({"reasoning": {"content": "在想"}}) == "在想"
+        assert _reasoning_of({"thinking": {"text": "在想"}}) == "在想"
+
+    def test_没有思维链就是空_不能误把正文当思考(self):
+        assert _reasoning_of({"content": "正文"}) == ""
+        assert _reasoning_of({}) == ""
+
+    def test_脏值不能抛异常(self):
+        """网关偶尔回 null / 数字，认不出就当没有，绝不能崩在流里。"""
+        assert _reasoning_of({"reasoning": None}) == ""
+        assert _reasoning_of({"reasoning": 0}) == ""
+        assert _reasoning_of({"reasoning": {"content": None}}) == ""
+        # 前一个字段是空的，要继续往后找
+        assert _reasoning_of({"reasoning_content": "", "reasoning": "在想"}) == "在想"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -213,7 +241,7 @@ class Test大纲流时序:
 def _独立运行() -> int:
     """没装 pytest 时的 runner。"""
     failed = 0
-    for cls in (Test攒段, Test大纲流时序):
+    for cls in (Test攒段, Test思维链字段兼容, Test大纲流时序):
         inst = cls()
         for name in sorted(dir(inst)):
             if not name.startswith("test_"):

@@ -21,6 +21,28 @@ log = logging.getLogger(__name__)
 _RETRYABLE_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
+def _reasoning_of(delta: dict[str, Any]) -> str:
+    """从流式 delta 里取思维链。
+
+    字段名各家没统一：DeepSeek 叫 reasoning_content，OpenRouter 和一部分兼容
+    网关叫 reasoning（有时直接是字符串，有时是 {"content": …} 的对象），
+    也见过叫 thinking 的。取不到就说明这个模型不吐思维链，前端那块区域自然
+    不显示；但只要它吐了，绝不能因为字段名认不出而白丢 —— 那是用户等待期间
+    唯一能看的东西。
+    """
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        val = delta.get(key)
+        if isinstance(val, str):
+            if val:
+                return val
+        elif isinstance(val, dict):
+            for inner_key in ("content", "text"):
+                inner = val.get(inner_key)
+                if isinstance(inner, str) and inner:
+                    return inner
+    return ""
+
+
 class OpenAICompatProvider:
     def __init__(self, name: str, base_url: str, api_key: str) -> None:
         self.name = name
@@ -217,7 +239,7 @@ class OpenAICompatProvider:
                             finish_reason = ch["finish_reason"]
                         d = ch.get("delta") or {}
                         # 推理模型的思维链：独立透出，绝不混入 delta（正文）
-                        if reasoning := d.get("reasoning_content"):
+                        if reasoning := _reasoning_of(d):
                             yield StreamChunk(
                                 reasoning=reasoning, model=actual_model, provider=self.name
                             )
