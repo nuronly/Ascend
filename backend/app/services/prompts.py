@@ -698,3 +698,136 @@ def review_grade_user(question: str, reference: str, answer: str) -> str:
         {"题目": question, "参考材料": reference[:1500], "学习者的回答": answer[:1500]},
         ensure_ascii=False,
     )
+
+
+# ─────────────────────────────────────────────────────────────
+# 章节刷题
+# ─────────────────────────────────────────────────────────────
+QUIZ_SYSTEM = """你在给一个学习者出一套复习题，检验他这一章到底掌握了多少。
+
+★ 这套题必须**针对他这个人**，不是针对这份教材
+
+  你会收到的每条素材都标了来源和状态。这些标注不是背景信息，是**出题的指令**：
+
+    「他问过」        他当时卡在这里 —— 必须出题
+    「他写过自己的理解」他的原话就在里面。出题检验那个理解站不站得住，
+                      而且要拿他的原话当判分依据（他理解偏了，就要问到那个偏差上）
+    「他标了还没搞懂」 他自己承认的缺口 —— 必须出题
+    「快忘了」        间隔重复算法判断他即将遗忘 —— 优先出题
+    「他重读过 N 次」 这一节他读不顺 —— 值得多问一道
+
+  只从正文平铺直叙地出题，是任何人都能做的事，那不叫复习。
+
+★ 题型与配比
+
+  · 绝大多数是选择题。**两个选项也完全可以**（"是/否"、"A 还是 B"），
+    题干本身就能承载辨析，不必硬凑四个选项 —— 凑出来的干扰项往往一眼假，
+    反而降低了辨析的价值。三四个选项只在"容易混淆的近义概念"上用。
+  · 最后放不超过 2 道简答题，问那种选择题问不出来的东西：让他复述机制、
+    说清因果、或者解释他自己写下的那句理解。
+  · 干扰项要**像真的**：用同章里另一个概念、或者常见的错误理解，
+    不要用明显荒谬的选项。一眼能排除的干扰项等于没有干扰项。
+
+★ 每道题都要标 card_id（如果它是从某张卡片出的）
+
+  这个字段决定了答题结果能不能回喂给间隔重复算法。从正文出的题留空字符串。
+
+只输出 JSON：
+{
+  "items": [
+    {
+      "kind": "choice",
+      "q": "题干",
+      "options": ["选项 A", "选项 B"],
+      "answer": 0,
+      "explain": "为什么是这个答案，两三句。答错的人最可能错在哪，也说一句",
+      "concept": "这道题考的知识点（短语，用于总结页聚合）",
+      "card_id": "溯源卡片 id，从正文出的题留空字符串",
+      "why": "为什么出这道题（他问过这个 / 他写的理解有偏差 / 快忘了）"
+    },
+    {
+      "kind": "short",
+      "q": "题干",
+      "answer": "参考答案的关键要点，判分时用",
+      "explain": "",
+      "concept": "…",
+      "card_id": "",
+      "why": "…"
+    }
+  ]
+}
+
+answer 字段：选择题是**正确选项的下标**（数字，从 0 起）；简答题是参考要点（字符串）。
+题干里不要出现"根据原文"、"文中提到"这类字样 —— 他是在凭记忆答题，不是在做阅读理解。"""
+
+
+QUIZ_GRADE_SYSTEM = """你在批改一道简答题。学习者是凭记忆答的，不要按考卷标准苛求字面完整。
+
+只输出 JSON：
+{
+  "score": 0.0~1.0,
+  "rating": 1~4,
+  "feedback": "两三句：答对了什么、漏了什么关键点、有没有理解偏差"
+}
+
+rating 对应间隔重复的评级：1=完全没答上来 2=很吃力 3=答得不错 4=轻松准确。
+判分尺度：**抓住机制就算对**，用词不同、举例不同都不扣分；
+但如果因果讲反了、或者把两个概念搞混了，那是真错，要明确指出来。
+反馈里直接说漏了什么，不要只说"很好，可以更完整"。"""
+
+
+def quiz_user(
+    *,
+    course_title: str,
+    chapter_title: str,
+    sections: list[dict],
+    cards: list[dict],
+    n_choice: int,
+    n_short: int,
+) -> str:
+    """出题素材。
+
+    ★ 组织顺序刻意是「他留下的痕迹」在前、「教材内容」在后
+      模型对靠前的内容更敏感，而我们要的正是让它优先往他卡过的地方出题。
+    """
+    lines: list[str] = [
+        f"课程：{course_title}",
+        f"这一章：{chapter_title}",
+        "",
+        f"出 {n_choice} 道选择题 + {n_short} 道简答题。",
+        "",
+    ]
+
+    if cards:
+        lines.append("── 他在这一章留下的痕迹（优先从这里出题）──")
+        for c in cards:
+            tags = [t for t in c.get("tags") or [] if t]
+            head = f"[{c['id']}]" + (f"（{' · '.join(tags)}）" if tags else "")
+            lines.append(head)
+            for k in ("划的词", "他问的", "当时的解答", "他自己写的理解", "他说还没搞懂"):
+                if v := c.get(k):
+                    lines.append(f"  {k}：{v}")
+            lines.append("")
+
+    lines.append("── 这一章的内容 ──")
+    for s in sections:
+        marks = [m for m in s.get("marks") or [] if m]
+        lines.append(f"◆ {s['title']}" + (f"（{' · '.join(marks)}）" if marks else ""))
+        if s.get("summary"):
+            lines.append(f"  要点：{s['summary']}")
+        if s.get("concepts"):
+            lines.append(f"  关键概念：{'、'.join(s['concepts'])}")
+        if s.get("excerpt"):
+            lines.append(f"  正文节选：{s['excerpt']}")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def quiz_grade_user(question: str, reference: str, answer: str, own: str = "") -> str:
+    payload = {"题目": question, "参考要点": reference[:1200], "他的回答": answer[:1500]}
+    if own:
+        # 他自己写过的理解 —— 判分时的第二把尺子：
+        # 如果他当初就理解偏了，这次答的和当初一致，那不该算对
+        payload["他当初写下的理解"] = own[:800]
+    return json.dumps(payload, ensure_ascii=False)

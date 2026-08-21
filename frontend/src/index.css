@@ -560,6 +560,62 @@ body {
   animation: note-fly 0.85s cubic-bezier(0.5, 0, 0.35, 1) forwards;
 }
 
+/* ── 刷题的四个动作 ──
+   刷题的爽感主要来自**键盘节奏**（数字键选、对了自动进下一题），
+   动画只是给这个节奏配上确认感。所以刻意只做四件小事：
+   选对了轻轻弹一下、选错了横向抖一下、连击数字跳一下、进度条推进。
+   满屏彩带那种在第三题就开始烦人，而刷一章要十几题。 */
+@keyframes quiz-right {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(1.035);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@keyframes quiz-wrong {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  20% {
+    transform: translateX(-5px);
+  }
+  45% {
+    transform: translateX(4px);
+  }
+  70% {
+    transform: translateX(-2px);
+  }
+}
+@keyframes streak-pop {
+  0% {
+    transform: scale(0.7);
+    opacity: 0;
+  }
+  55% {
+    transform: scale(1.18);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+.quiz-right {
+  animation: quiz-right 0.26s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.quiz-wrong {
+  /* 抖动要短：它是「错了」的即时反馈，不是惩罚 */
+  animation: quiz-wrong 0.3s cubic-bezier(0.36, 0.07, 0.19, 0.97);
+}
+.streak-pop {
+  animation: streak-pop 0.28s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
 .animate-fade-up {
   animation: fade-up 0.22s cubic-bezier(0.16, 1, 0.3, 1);
 }

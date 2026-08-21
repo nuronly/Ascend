@@ -43,6 +43,7 @@ from app.models.learning import (
     POMO_RUNNING,
     Badge,
     Pomodoro,
+    Quiz,
     ReviewLog,
     ReviewState,
 )
@@ -80,6 +81,7 @@ __all__ = [
     "RELATIONS",
     "Pomodoro",
     "RefreshToken",
+    "Quiz",
     "ReviewLog",
     "ReviewState",
     "SECTION_FAILED",

@@ -92,6 +92,52 @@ class ReviewLog(Base):
     ai_feedback: Mapped[str] = mapped_column(Text, default="", nullable=False)
 
 
+class Quiz(Base):
+    """一章的一套题（章节刷题）。
+
+    ★ 为什么把题目和答题记录一起塞在 items JSON 里，而不是拆成两张表
+
+      一套题是**一次性的整体**：它由这一刻的素材（正文 + 卡片 + 笔记 +
+      FSRS 状态）生成，题目、答案、解析、溯源卡片、用户答了什么、判对没，
+      这些永远一起读、一起写、从不单独查询。拆表只会换来每次都要 join。
+      真正需要被单独查询的东西（复习历史、排程）已经在 ReviewLog /
+      ReviewState 里了 —— 刷题的结果会喂过去。
+
+    ★ 为什么要落库（而不是一次性发给前端就算了）
+      · 总结页要统计（几道题、哪些知识点、哪里薄弱）
+      · 中途关掉页面能回来接着刷 —— 一套题的生成是有模型成本的，扔掉太浪费
+      · 错题要能回顾：「上次这一章你错在哪」
+    """
+
+    __tablename__ = "quizzes"
+
+    id: Mapped[str] = pk()
+    user_id: Mapped[str] = mapped_column(
+        IdType, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    # 出题范围。章被删（课被删）时整套题一起走 —— 题目脱离了章没有意义
+    chapter_id: Mapped[str] = mapped_column(
+        IdType, ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # 冗余存一份标题：章可能被删，但总结历史还想显示「你刷过哪一章」
+    chapter_title: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    course_id: Mapped[str | None] = mapped_column(IdType, index=True)
+    course_title: Mapped[str] = mapped_column(String(500), default="", nullable=False)
+    #: 题目 + 答题记录。每项：
+    #:   {"kind": "choice"|"short", "q": 题干, "options": [...], "answer": 正确项下标/要点,
+    #:    "explain": 解析, "card_id": 溯源卡片（可空）, "concept": 知识点,
+    #:    "why": 为什么出这道题（他问过 / 他写过己见 / 快忘了…）,
+    #:    "picked": 用户选了什么, "correct": 对没对, "reply": 简答的原文,
+    #:    "score": 简答得分, "feedback": 简答反馈}
+    items: Mapped[list[Any]] = mapped_column(JSONType, default=list, nullable=False)
+    #: 总结。{"total","right","streak_best","concepts":[...],"weak":[...],"links":[...]}
+    summary: Mapped[dict[str, Any]] = mapped_column(JSONType, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, nullable=False, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(TZDateTime)
+
+    __table_args__ = (Index("ix_quizzes_user_created", "user_id", "created_at"),)
+
+
 class Badge(Base):
     """勋章（PLAN §3.7）。异步生图：先发占位，图好了替换。"""
 
