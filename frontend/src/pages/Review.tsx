@@ -13,6 +13,7 @@ import {
   type ChapterTarget,
   type QuizData,
 } from '@/lib/quiz'
+import { Markdown } from '@/components/Markdown'
 import { Button, Empty, Modal, Spinner, Textarea } from '@/components/ui'
 import { cn, relativeTime } from '@/lib/utils'
 
@@ -439,7 +440,11 @@ export default function ReviewPage() {
             {item.kind === 'short' && <span>· 简答</span>}
             {!!item.concept && <span className="truncate">· {item.concept}</span>}
           </div>
-          <div className="text-[15.5px] font-medium leading-[1.6]">{item.q}</div>
+          {/* ★ 走 Markdown 而不是纯文本：出题模型会用 LaTeX 写公式
+              （$k^n$、$|O_i|\times|A_i|$），纯文本渲染出来是一串美元符号 */}
+          <Markdown variant="card" className="prose-quiz">
+            {item.q}
+          </Markdown>
         </div>
 
         {item.kind === 'choice' ? (
@@ -476,7 +481,11 @@ export default function ReviewPage() {
                   >
                     {i + 1}
                   </span>
-                  <span className="grow">{opt}</span>
+                  <div className="grow min-w-0">
+                    <Markdown variant="card" className="prose-tight">
+                      {opt}
+                    </Markdown>
+                  </div>
                 </button>
               )
             })}
@@ -530,14 +539,15 @@ export default function ReviewPage() {
               )}
             </div>
 
-            {item.kind === 'short' && (
-              <div className="mt-2 text-[12.5px] leading-relaxed text-[var(--text-muted)]">
-                {shortFb?.feedback}
+            {/* 解析与反馈里同样会有公式 */}
+            {item.kind === 'short' && !!shortFb?.feedback && (
+              <div className="mt-2 text-[var(--text-muted)]">
+                <Markdown variant="card">{shortFb.feedback}</Markdown>
               </div>
             )}
             {item.kind === 'choice' && !!item.explain && (
-              <div className="mt-2 text-[12.5px] leading-relaxed text-[var(--text-muted)]">
-                {item.explain}
+              <div className="mt-2 text-[var(--text-muted)]">
+                <Markdown variant="card">{item.explain}</Markdown>
               </div>
             )}
 

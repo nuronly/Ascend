@@ -437,6 +437,22 @@ body {
   padding: 0.3em 0.5em;
 }
 
+/* 刷题的题干：比卡片正文大一档。
+   ⚠️ 必须定义在 .prose-card **之后** —— 两者都是单类选择器，
+      同优先级下靠顺序决胜。写成 Tailwind 的 text-[15.5px] 反而会被
+      .prose-card 的 font-size 压掉（自定义样式在 @import 'tailwindcss' 之后）。
+   题干走 Markdown 而不是纯文本，是因为出题模型会用 LaTeX 写公式
+   （$|O_i|\times|A_i|$ 这种）—— 纯文本渲染的话用户看到的是一串美元符号。 */
+.prose-quiz {
+  font-size: 15.5px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+/* 选项里的段落不要额外间距：它在一个 flex 行里，与序号标签同排 */
+.prose-tight > p {
+  margin: 0;
+}
+
 /* KaTeX 跟随正文尺寸，公式过长时横向滚动而不是撑破布局 */
 .katex {
   font-size: 1.04em;
