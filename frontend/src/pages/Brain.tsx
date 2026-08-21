@@ -56,6 +56,15 @@ export default function BrainPage() {
   const [stage, setStage] = useState<{ key: string; count: number } | null>(null)
   // 记忆工具的调用过程：它去读了哪份笔记、查了哪门课的大纲
   const [tools, setTools] = useState<ToolStep[]>([])
+  /**
+   * 思维链。文本问答刻意是**质量优先**的 —— 等待用「过程可见」化解，
+   * 而不是靠砍掉思考来提速（那是语音那条路的取舍，两者目标相反）。
+   *
+   * 后端原来把 reasoning 直接丢了，理由是「避免和引用列表抢注意力」。
+   * 结果这几秒对用户就是纯空白：思考链既没换来可见内容，又实打实占着时间。
+   * 而 RunTimeline 早就支持折叠展示（一行摘要 + 原文），大纲和正文都在用。
+   */
+  const [thinking, setThinking] = useState({ chars: 0, text: '' })
   const [timeline, setTimeline] = useState(1)
   const [playing, setPlaying] = useState(false)
   const [view, setView] = useState<'split' | 'net' | 'chat'>('split')
@@ -115,6 +124,7 @@ export default function BrainPage() {
     setBusy(true)
     setStatus('正在检索你的学习记录…')
     setTools([])
+    setThinking({ chars: 0, text: '' })
     netRef.current?.reset()
 
     const ctrl = new AbortController()
@@ -141,6 +151,16 @@ export default function BrainPage() {
           } else {
             netRef.current?.activate(ids, data.stage === 'vector' ? 'vector' : 'fulltext', 0.9)
           }
+        }
+
+        // 思维链：后端已经攒成段发过来（逐 token 直推会让 setState 几千次）
+        if (ev === 'thinking') {
+          setStatus('')
+          setThinking((s) => ({
+            chars: data?.chars ?? s.chars,
+            // 只留尾部：整段思维链能有几千字，全塞进 DOM 没意义也不好读
+            text: (s.text + (data?.text ?? '')).slice(-1200),
+          }))
         }
 
         // ★ 记忆工具：预检索只给摘要，模型会自己去读笔记全文 / 大纲 / 已知边界。
@@ -506,12 +526,20 @@ export default function BrainPage() {
                             </div>
                           )}
 
-                          {/* 正在查什么（读笔记全文 / 查大纲 / 看已知边界） */}
-                          {i === turns.length - 1 && busy && !!tools.length && (
-                            <div className="mb-3">
-                              <RunTimeline thinking={0} tools={tools} />
-                            </div>
-                          )}
+                          {/* 在想什么、正在查什么（读笔记全文 / 查大纲 / 看已知边界）。
+                              判据带上 thinking.chars —— 思考链往往先于工具调用出现，
+                              只看 tools.length 的话最前面那几秒仍然是空白 */}
+                          {i === turns.length - 1 &&
+                            busy &&
+                            (!!tools.length || thinking.chars > 0) && (
+                              <div className="mb-3">
+                                <RunTimeline
+                                  thinking={thinking.chars}
+                                  thinkingText={thinking.text}
+                                  tools={tools}
+                                />
+                              </div>
+                            )}
 
                           {t.content ? (
                             <div className={cn(t.empty && 'text-[var(--text-muted)]')}>
@@ -524,7 +552,7 @@ export default function BrainPage() {
                               <Spinner className="size-3.5 text-[var(--accent)]" />
                               {status}
                             </div>
-                          ) : tools.length ? null : (
+                          ) : tools.length || thinking.chars ? null : (
                             <div className="space-y-2">
                               <div className="skeleton h-3.5 w-4/5" />
                               <div className="skeleton h-3.5 w-full" />

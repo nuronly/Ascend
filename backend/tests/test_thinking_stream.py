@@ -223,6 +223,144 @@ class Test大纲流时序:
         assert th["data"]["text"] == "想一下"
         assert th["data"]["chars"] == 3
 
+
+async def _brain_events(chunks: list[StreamChunk]) -> list[dict]:
+    """跑一遍第二大脑的问答流。
+
+    刻意只替掉「外部世界」（检索、重排、模型），保留 answer_stream 自己的
+    事件编排 —— 要测的正是它对 reasoning 的处理。
+    """
+    from app.services import brain as brain_mod
+
+    class _Card:
+        id = "k1"
+        summary = "摘要"
+        selected_text = "选中的话"
+        question = "问题"
+        ai_answer = "答案"
+        user_note = ""
+        is_rewritten = False
+        kind = "card"
+        source_section_id = None
+        created_at = __import__("datetime").datetime(2026, 1, 1)
+        touch_count = 0
+        last_touched_at = None
+        concept_tags: list = []
+        depth = 0
+
+    trace = brain_mod.RecallTrace(
+        fulltext=["k1"], vector=[], graph=[], seeds=["k1"], fused=[("k1", 1.0)]
+    )
+
+    async def fake_retrieve(*_a, **_kw):
+        return [_Card()], trace
+
+    async def fake_rerank(_scope, _q, cards, **_kw):
+        return cards
+
+    async def fake_cite_meta(*_a, **_kw):
+        return {}
+
+    class _Scope:
+        user_id = "u1"
+
+        async def commit(self):
+            return None
+
+    # ⚠️ memory_tools 是在 answer_stream **函数体内**导入的（避免循环依赖），
+    #    所以要替源模块的属性，替 brain_mod 上的替不到 —— 那里压根没有这个名字
+    from app.llm.tools import memory as memory_mod
+
+    real = (
+        brain_mod.retrieve_traced, brain_mod.rerank,
+        brain_mod._cite_meta, brain_mod.stream_chat, memory_mod.memory_tools,
+    )
+    brain_mod.retrieve_traced = fake_retrieve  # type: ignore[assignment]
+    brain_mod.rerank = fake_rerank  # type: ignore[assignment]
+    brain_mod._cite_meta = fake_cite_meta  # type: ignore[assignment]
+    brain_mod.stream_chat = _fake_stream_chat(chunks)  # type: ignore[assignment]
+    memory_mod.memory_tools = lambda *_a, **_kw: []  # type: ignore[assignment]
+    try:
+        return [ev async for ev in brain_mod.answer_stream(_Scope(), "我学过什么")]  # type: ignore[arg-type]
+    finally:
+        (
+            brain_mod.retrieve_traced, brain_mod.rerank,
+            brain_mod._cite_meta, brain_mod.stream_chat, memory_mod.memory_tools,
+        ) = real
+
+
+class Test第二大脑的等待不能是空白:
+    """★ 文本问答是**质量优先**的一条路：思考链留着，等待用「过程可见」化解。
+
+    这和语音那条路的取舍正好相反 —— 语音里思考链读不出来，是纯延迟，
+    必须关掉。两条路共用一个模型能力，但优化目标不同，不该互相污染。
+
+    这里守的是一个曾经的真实退化：answer_stream 里写着
+    `if chunk.reasoning: continue`（理由是「避免和引用列表抢注意力」），
+    于是思考链既没换来可见内容，又实打实占着几秒 —— 用户对着空白等。
+    """
+
+    def test_思维链要透出去而不是被丢掉(self):
+        events = asyncio.run(
+            _brain_events(
+                [
+                    StreamChunk(reasoning="他问的是注意力，先看有没有笔记"),
+                    StreamChunk(delta="你记的是缩放点积。"),
+                ]
+            )
+        )
+        th = [e for e in events if e["event"] == "thinking"]
+        assert th, "思维链被丢了 —— 那几秒对用户就是纯空白"
+        assert th[0]["data"]["text"] == "他问的是注意力，先看有没有笔记"
+        assert th[0]["data"]["chars"] == 15
+
+    def test_思考不能混进正文(self):
+        events = asyncio.run(
+            _brain_events(
+                [
+                    StreamChunk(reasoning="内心活动"),
+                    StreamChunk(delta="正式回答"),
+                ]
+            )
+        )
+        text = "".join(
+            e["data"]["text"] for e in events if e["event"] == "delta"
+        )
+        assert text == "正式回答"
+        assert "内心活动" not in text
+
+    def test_思考在工具调用之前收尾(self):
+        """攒着的半句思考不能拖到工具事件后面才露出来 —— 时序会读成
+        「查完了才开始想」。"""
+        events = asyncio.run(
+            _brain_events(
+                [
+                    StreamChunk(reasoning="先查笔记"),
+                    StreamChunk(
+                        tool_event=ToolEvent(phase="call", name="read_note", detail="n1")
+                    ),
+                    StreamChunk(reasoning="拿到了，再组织一下"),
+                    StreamChunk(delta="你记的是"),
+                ]
+            )
+        )
+        names = [e["event"] for e in events]
+        assert names.index("thinking") < names.index("tool_call")
+        th = [e for e in events if e["event"] == "thinking"]
+        # 第二段不足一段长，也必须在正文开始前 flush 出来
+        assert len(th) == 2
+        assert th[1]["data"]["text"] == "拿到了，再组织一下"
+
+    def test_引用先落地再想(self):
+        """引用列表是最早能给的确定信息，不该等在思考后面。"""
+        events = asyncio.run(
+            _brain_events(
+                [StreamChunk(reasoning="想想"), StreamChunk(delta="答")]
+            )
+        )
+        names = [e["event"] for e in events]
+        assert names.index("citations") < names.index("thinking")
+
     def test_思维链不进大纲_json(self):
         """思维链里常常出现看着就像结果的片段，混进 buf 会让整份大纲报废。"""
         chunks = [
@@ -241,7 +379,12 @@ class Test大纲流时序:
 def _独立运行() -> int:
     """没装 pytest 时的 runner。"""
     failed = 0
-    for cls in (Test攒段, Test思维链字段兼容, Test大纲流时序):
+    for cls in (
+        Test攒段,
+        Test思维链字段兼容,
+        Test大纲流时序,
+        Test第二大脑的等待不能是空白,
+    ):
         inst = cls()
         for name in sorted(dir(inst)):
             if not name.startswith("test_"):

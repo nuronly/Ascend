@@ -24,7 +24,7 @@ from sqlalchemy import select
 from app.core.config import TIER_FLAGSHIP, TIER_SMALL
 from app.core.scope import UserScope
 from app.core.types import utcnow
-from app.llm import Message, chat_json, embed, stream_chat
+from app.llm import Message, ThinkingBuffer, chat_json, embed, stream_chat
 from app.models.card import KIND_NOTE, LINK_REAL, STATE_ARCHIVED, STATE_VAULT, Card
 from app.models.course import Chapter, Course, Section
 from app.models.system import CardSearch
@@ -248,8 +248,12 @@ async def rerank(
             temperature=0.1,
             max_tokens=1200,
             quota=quota,
-            # 打个相关性分数不需要思考链。实测这一步要 1.2 秒，
-            # 而它在用户的等待里是纯静默的一段
+            # ★ 这里关思考链是对的，和终答那边不冲突：
+            #   打个相关性分数不需要想，而且 chat_json 是**非流式**的 ——
+            #   它的思考链没有任何办法展示出来，就是纯静默的一两秒。
+            #   实测这一步中位 1.7 秒，占了首字延迟的一半。
+            #   判据始终是「这段等待能不能变成用户看得见的内容」：
+            #   能（终答的流式思考链）就留着，不能（这里）就关掉。
             thinking=False,
         )
     except Exception:
@@ -384,6 +388,13 @@ async def answer_stream(
     tools = memory_tools(scope)
 
     # 终答用旗舰模型 —— 质量直接决定产品可信度（PLAN §4.1）
+    #
+    # ★ 这条路刻意是**质量优先**的，和语音那条路的取舍正好相反：
+    #   文本问答里用户看着屏幕，等待可以用「过程可见」来化解 —— 思考链、
+    #   正在查什么、引用先落地。所以思考链在这里是**资产**（既是质量来源，
+    #   也是等待期唯一有内容的东西），不该为了快关掉它。
+    #   语音则相反：思考链没法读出来，是纯延迟，那条路要单独走。
+    think = ThinkingBuffer()
     try:
         async for chunk in stream_chat(
             [
@@ -394,26 +405,27 @@ async def answer_stream(
             tier=TIER_FLAGSHIP,
             user_id=scope.user_id,
             temperature=0.4,
-            max_tokens=6000,  # 带工具的多轮往返，给足额度
+            # ★ 12000 而不是 6000：带工具的多轮往返，每轮还有一条思考链。
+            #   6000 会被思考链吃光然后正文零产出 —— 这个坑在大纲上踩过两次
+            #   （router.chat 里那条「思维链吃光了 max_tokens」的警告就是为它加的）
+            max_tokens=12000,
             quota=quota,
             tools=tools,
-            # ★ 只给一轮工具。原来漏了这个参数，于是吃全局的 tool_max_rounds=3 ——
-            #   而那个 3 是按大纲那种「值得多找几轮资料」的场景定的。
-            #   实测后果：一个问题打 13 次工具、跑 4 次完整往返、首字 40 秒
-            #   （模型一轮里能并行发四五个调用，且这些调用是串行执行的）。
-            #   这里本来就不缺素材 —— 前面的四路召回 + 重排已经递了 5 条摘要，
-            #   工具的价值只在「把某份笔记读全」，一轮足够。
-            max_rounds=1,
-            # ★ 问答要的是快。实测关掉思考链：首字 3420ms → 758ms。
-            #   而且思考链正是 DSML 标记泄漏的土壤（报错原文就是
-            #   「reasoning_content in the thinking mode must be passed back」）。
-            #   正文与笔记生成不关 —— 那里思考链是产品特性（等待期看得见它在想）。
-            thinking=False,
+            # ★ 压到 2 轮，与正文/笔记一致。
+            #   原来漏传这个参数，吃的是全局 tool_max_rounds=3 —— 而那个 3 是按
+            #   大纲那种「值得多找几轮资料」的场景定的。实测 3 轮的样子：
+            #   第 1 轮并行 4 个 search_memory + my_boundary，第 2 轮 5 个
+            #   read_note + read_outline，第 3 轮又 2 个 read_outline。
+            #   13 次调用**没有一次重复**（所以不是白调，是在广撒网），
+            #   但第 3 轮的边际价值明显最低 —— 前两轮已经把卡片和笔记都拿到了。
+            max_rounds=2,
         ):
             if chunk.done:
                 break
             # 正在查什么、查到了什么，实时说出来（与大纲/正文一致的处理）
             if chunk.tool_event:
+                if pending := think.flush():  # 想完了去查东西，先把那半句思考说完
+                    yield pending
                 ev = chunk.tool_event
                 yield {
                     "event": f"tool_{ev.phase}",
@@ -425,9 +437,18 @@ async def answer_stream(
                     },
                 }
                 continue
+            # ★ 思维链原文透出去。
+            #   原来这里是 `continue` —— 直接丢掉，理由是「避免和引用列表抢注意力」。
+            #   但那样一来这段时间对用户就是纯空白：思考链既没换来可见的内容，
+            #   又实打实占着几秒。而项目里早有现成的折叠展示（RunTimeline
+            #   一行摘要 + 点开看全文），大纲和正文都在用，第二大脑没接上而已。
             if chunk.reasoning:
-                continue  # 第二大脑不展示思维链，避免和引用列表抢注意力
+                if pending := think.add(chunk.reasoning):
+                    yield pending
+                continue
             if chunk.delta:
+                if pending := think.flush():  # 开始说正文了，思考阶段收尾
+                    yield pending
                 yield {"event": "delta", "data": {"text": chunk.delta}}
     except Exception as exc:
         yield {"event": "error", "data": {"message": str(exc)[:400]}}
