@@ -14,7 +14,7 @@ import { TOOL_ACTION, settleStep, toolStep, type ToolStep } from './tools'
 
 describe('工具标签', () => {
   it('说人话，不显示函数名', () => {
-    expect(toolStep('read_note', 'abc123').label).toBe('读我那一节的笔记全文')
+    expect(toolStep('read_note', 'abc123').label).toBe('读我记下来的全文')
     expect(toolStep('my_boundary').label).toBe('看我的已知边界')
   })
 

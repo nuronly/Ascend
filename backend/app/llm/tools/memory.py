@@ -119,11 +119,17 @@ class SearchMemory:
             for c in cards[:8]:
                 body = (c.user_note or c.ai_answer or "").replace("\n", " ")
                 title = c.question or c.selected_text or "（无题）"
+                # ★ 摘要为空要说清是为什么。原来直接留一行「摘要：」，模型看到
+                #   一条没内容的命中，只能去 read_note 撞一次运气 ——
+                #   而这种卡（问了但答案没生成完）本来就没有全文可读
+                abstract = (c.summary or body)[:_ABSTRACT] or (
+                    "（他提了这个问题，但没有留下答案 —— 不要假定他已经懂了）"
+                )
                 lines.append(
                     f"[{_kind_label(c.kind)}] {title}\n"
-                    f"  摘要：{(c.summary or body)[:_ABSTRACT]}\n"
+                    f"  摘要：{abstract}\n"
                     f"  id={c.id}"
-                    + ("（可用 read_note 读全文）" if c.kind == KIND_NOTE else "")
+                    + ("（可用 read_note 读全文）" if (c.kind == KIND_NOTE or body) else "")
                 )
                 display["items"].append(
                     {"id": c.id, "kind": c.kind, "title": title[:80], "section_id": c.source_section_id}
@@ -211,12 +217,24 @@ class SearchMemory:
 
 
 class ReadNote:
-    """读一份笔记的**当前**全文。"""
+    """读一份笔记 / 一张疑问卡的**当前**全文。
+
+    ★ 为什么它也认疑问卡
+
+      服务器上真跑一次就看见了：模型拿着 search_memory 返回的疑问卡 id 来调
+      这个工具，连着三次拿回「这一节还没有笔记」。它没做错什么 —— 摘要只有
+      一行，它想看全文，手里只有这一件工具。
+
+      名字仍叫 read_note（改名要牵动前端标签、三处 prompt 说明与测试，
+      而这里的 note 泛指「他记下来的东西」）。行为改成：给什么 id 就读什么，
+      笔记 / 疑问卡 / section_id 三种都认。把三次浪费变成三次有用。
+    """
 
     name = "read_note"
     description = (
-        "读取这位学习者某一节的笔记全文（他自己改写过的版本）。"
-        "search_memory 只给摘要，真要引用他的原话就用这个 —— "
+        "读取这位学习者记下的东西的全文：某一节的笔记（他自己改写过的版本），"
+        "或 search_memory 返回的某张疑问卡（问题 + 解答 + 他写下的理解）。"
+        "search_memory 只给一行摘要，真要引用他的原话就用这个 —— "
         "笔记是他反复修改的东西，只有这里拿到的才是当前版本。"
     )
 
@@ -229,7 +247,9 @@ class ReadNote:
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "search_memory 返回的 id 或 section_id，两种都认",
+                    "description": (
+                        "search_memory 返回的 id（笔记或疑问卡）或 section_id，都认"
+                    ),
                 }
             },
             "required": ["id"],
@@ -240,9 +260,13 @@ class ReadNote:
         if not raw:
             return ToolResult(content="没有给 id。", summary="缺少 id")
 
-        # 先当笔记 id 试，再当 section_id 试 —— 模型经常混用这两个
+        # 先按 id 直取（笔记与疑问卡都在 cards 表里），取不到再当 section_id 试 ——
+        # 模型经常把 section_id 当卡 id 传
         card = await self._scope.get(Card, raw)
-        if card is None or card.kind != KIND_NOTE:
+        # 归档过的卡是他主动扔掉的东西，不该被翻出来当依据
+        if card is not None and card.state == STATE_ARCHIVED:
+            card = None
+        if card is None:
             card = await self._scope.one_or_none(
                 self._scope.select(Card)
                 .where(
@@ -256,11 +280,14 @@ class ReadNote:
         if card is None:
             return ToolResult(
                 content=(
-                    "这一节他还没有写笔记。不要假装读到了内容 —— "
-                    "可以基于 search_memory 里的疑问卡来判断他的理解。"
+                    "这个 id 在他的记录里不存在，这一节也还没有写笔记。"
+                    "不要假装读到了内容 —— 可以基于 search_memory 里的摘要来判断。"
                 ),
-                summary="这一节还没有笔记",
+                summary="没有这份内容",
             )
+
+        if card.kind == KIND_CARD:
+            return self._card_result(card)
 
         # ★ 终稿优先：user_note 是他改写过的版本，ai_answer 只是当初的草稿
         body = (card.user_note or card.ai_answer or "").strip()
@@ -269,6 +296,33 @@ class ReadNote:
             content=f"《{card.question}》的笔记全文 {edited}：\n\n{body[:_FULL_NOTE]}",
             summary=f"读了《{card.question}》",
             display={"card_id": card.id, "title": card.question, "edited": card.is_rewritten},
+        )
+
+    def _card_result(self, card: Card) -> ToolResult:
+        """一张疑问卡的全文。
+
+        己见单独标出来并要求原样引用 —— 那是他自己的话，是这张卡里最值钱的部分，
+        也是判断「他到底懂到哪一层」唯一可靠的依据。
+        """
+        parts = [f"他的一张疑问卡《{card.question}》："]
+        if card.selected_text:
+            parts.append(f"他划中的是：「{card.selected_text}」")
+        if card.context_text:
+            parts.append(f"划中处的上下文：{card.context_text[:400]}")
+        answer = (card.ai_answer or "").strip()
+        if answer:
+            parts.append(f"当时给他的解答：\n{answer[:_FULL_NOTE // 2]}")
+        else:
+            parts.append(
+                "★ 这张卡没有解答 —— 他提了这个问题就走了。"
+                "所以这里恰好是他的空白，不要当成他已经懂了。"
+            )
+        if note := (card.user_note or "").strip():
+            parts.append(f"★ 他自己写下的理解（引用时用他的原话）：\n{note[:_FULL_NOTE // 2]}")
+        return ToolResult(
+            content="\n\n".join(parts),
+            summary=f"读了卡片《{card.question[:24]}》",
+            display={"card_id": card.id, "title": card.question, "kind": KIND_CARD},
         )
 
 

@@ -28,7 +28,7 @@ if str(_BACKEND) not in sys.path:
 
 from app.core.types import utcnow  # noqa: E402
 from app.llm.tools import memory as mem  # noqa: E402
-from app.models.card import KIND_CARD, KIND_NOTE, Card  # noqa: E402
+from app.models.card import KIND_CARD, KIND_NOTE, STATE_ARCHIVED, Card  # noqa: E402
 from app.models.course import Chapter, Course, Section  # noqa: E402
 
 
@@ -108,6 +108,12 @@ class FakeScope:
         return None
 
     async def one_or_none(self, _stmt):
+        # 真身那条语句带 kind=note 与 state != archived。替身不照做的话，
+        # 「归档过的不给读」这类语义根本测不出来
+        if self._note is None:
+            return None
+        if self._note.kind != KIND_NOTE or self._note.state == STATE_ARCHIVED:
+            return None
         return self._note
 
     async def all(self, _stmt):
@@ -162,6 +168,40 @@ class Test读笔记:
     def test_空_id_不炸(self):
         assert "没有给 id" in _run(mem.ReadNote(FakeScope()), id="").content
 
+    def test_归档过的不给读(self):
+        """归档是他主动扔掉的动作，翻出来当依据等于不认这个动作。"""
+        r = _run(mem.ReadNote(FakeScope(note=_note(state="archived"))), id="n1")
+        assert "我自己改写过的终稿" not in r.content
+
+
+class Test读疑问卡:
+    """★ 服务器上真跑一次才发现的：模型拿疑问卡的 id 来调 read_note。
+
+    它没做错什么 —— search_memory 只给一行摘要，它想看全文，手里只有这一件
+    工具。原来连着三次拿回「这一节还没有笔记」，三次白烧。现在给什么读什么。
+    """
+
+    def test_卡片_id_也能读到全文(self):
+        r = _run(mem.ReadNote(FakeScope(note=_card())), id="c1")
+        assert "因为点积方差随维度增长" in r.content
+        assert "softmax" in r.content  # 他划中的那个词
+        assert "疑问卡" in r.content
+
+    def test_己见要标成用他的原话(self):
+        """卡片里最值钱的是他自己写的那段，也是判断他懂到哪一层唯一可靠的依据。"""
+        r = _run(
+            mem.ReadNote(FakeScope(note=_card(user_note="我觉得是为了控方差"))),
+            id="c1",
+        )
+        assert "我觉得是为了控方差" in r.content
+        assert "他的原话" in r.content
+
+    def test_没有解答的卡要说清那是他的空白(self):
+        """问了就走的卡最容易被当成「他学过这个」—— 恰恰相反。"""
+        r = _run(mem.ReadNote(FakeScope(note=_card(ai_answer="", user_note=""))), id="c1")
+        assert "没有解答" in r.content
+        assert "不要当成他已经懂了" in r.content
+
 
 class Test检索记忆:
     def _tool(self, cards: list[Card]):
@@ -193,7 +233,7 @@ class Test检索记忆:
         assert "read_note" in r.content  # 告诉模型下一步能干什么
         assert r.display["items"][0]["kind"] == KIND_NOTE
 
-    def test_疑问卡给摘要不给全文入口(self):
+    def test_疑问卡也给全文入口(self):
         tool = self._tool([_card()])
         try:
             r = _run(tool, query="softmax")
@@ -201,6 +241,17 @@ class Test检索记忆:
             self._restore()
         assert "[疑问卡]" in r.content
         assert "缩放点积注意力的方差控制" in r.content
+        assert "read_note" in r.content  # 有内容就该能读全文
+
+    def test_没有答案的卡如实说_而不是留一行空摘要(self):
+        """留空的话模型只能去 read_note 撞运气 —— 而这种卡本来就没有全文。"""
+        tool = self._tool([_card(summary="", ai_answer="", user_note="")])
+        try:
+            r = _run(tool, query="softmax")
+        finally:
+            self._restore()
+        assert "没有留下答案" in r.content
+        assert "read_note" not in r.content
 
     def test_按_kind_过滤(self):
         tool = self._tool([_note(), _card()])
@@ -335,6 +386,7 @@ def _独立运行() -> int:
     ok = failed = 0
     for cls in (
         Test读笔记,
+        Test读疑问卡,
         Test检索记忆,
         Test小节命中要如实说有没有笔记,
         Test工具契约,

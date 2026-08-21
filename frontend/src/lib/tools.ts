@@ -32,7 +32,9 @@ export interface ToolStep {
 export const TOOL_ACTION: Record<string, string> = {
   web_search: '联网核实',
   search_memory: '翻我的学习记录',
-  read_note: '读我那一节的笔记全文',
+  // 它既能读某一节的笔记，也能读某一张疑问卡 —— 说「笔记全文」会让人
+  // 看到「读我那一节的笔记全文」却实际读的是一张卡，对不上
+  read_note: '读我记下来的全文',
   read_outline: '查这门课的大纲与前置依赖',
   my_boundary: '看我的已知边界',
 }
