@@ -17,6 +17,7 @@ import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
 from sqlalchemy import select
 
@@ -24,7 +25,7 @@ from app.core.config import TIER_FLAGSHIP, TIER_SMALL
 from app.core.scope import UserScope
 from app.core.types import utcnow
 from app.llm import Message, chat_json, embed, stream_chat
-from app.models.card import LINK_REAL, STATE_VAULT, Card
+from app.models.card import KIND_NOTE, LINK_REAL, STATE_ARCHIVED, STATE_VAULT, Card
 from app.models.course import Chapter, Course, Section
 from app.models.system import CardSearch
 from app.search.fts import search_cards_fts
@@ -475,99 +476,277 @@ async def reindex_missing(scope: UserScope, limit: int = 100) -> int:
     return done
 
 
-async def memory_network(scope: UserScope, limit: int = 800) -> dict:
+# ─────────────────────────────────────────────────────────────
+# 记忆网络
+# ─────────────────────────────────────────────────────────────
+# 节点类型。★ 结构本身就是知识单元，不是脚手架 ——
+#   学完一节课就是获得了一块知识，这跟划词提问获得一块知识是同一件事，
+#   而且正文是主干、卡片只是旁支。原来这张网只画卡片，于是一个认真读完
+#   十二节但不怎么划词的人，网络里几乎是空的 —— 他明明学了很多。
+NODE_COURSE = "course"
+NODE_CHAPTER = "chapter"
+NODE_SECTION = "section"
+
+# 结构节点的 id 前缀。
+# ★ 卡片节点的 id 必须保持**裸 id**：第二大脑召回时点亮走的就是卡片 id
+#   （brain.answer_stream 的 recall 事件），加了前缀就再也点不亮了。
+#   所以前缀只加在结构节点上，顺带让前端能按前缀分派点击行为。
+P_COURSE = "co:"
+P_CHAPTER = "ch:"
+P_SECTION = "sec:"
+
+# 小节「掌握程度」的几档。
+# ★ 这不是 FSRS 的 stability，是两种不同的量：卡片的强度来自真实复习记录，
+#   小节的强度是学习进度的粗略代理。共用同一条亮度通道是刻意的（都在回答
+#   「这块知识有多牢」），但 hover 文案必须分开说，不能管小节叫「记忆强度」。
+SEC_READ = 0.35  # 生成过正文 = 至少读过
+SEC_DONE = 0.70  # 标记学完
+SEC_NOTE_BONUS = 0.30  # 收成过笔记 —— 亲手写过的那一节，记得最牢
+
+
+def _card_strength(st: Any) -> float:
+    """FSRS stability → 0~1。以天为单位，取对数压缩。"""
+    stability = float(getattr(st, "stability", 0) or 0) if st else 0.0
+    return min(1.0, math.log1p(max(stability, 0)) / math.log1p(120))
+
+
+async def memory_network(scope: UserScope, card_limit: int = 900) -> dict:
     """整张记忆网络的快照。
 
-    这是「第二大脑」的具象化：每张 vault 卡是一个神经元，
-    父子链与 real link 是突触，FSRS 的 stability 决定它有多亮。
-    快遗忘的节点会自然暗下去 —— 用户能**看到**自己正在遗忘什么。
+    ★ 骨架是课程结构，不是用户手建的连线
+
+      原来的边只有两种来源：追问的父子链，和用户在卡片空间里手动拉的线。
+      后者全库总共 3 条 —— 于是这张网实际画的是「你手动拉过几根线」，
+      孤岛率 33%，连唯一那张永久笔记都被判成「孤岛（濒临遗忘）」，
+      画成最小最暗的一点。系统里最有价值的单元，视觉上最不值钱。
+
+      换成课程结构做骨架之后，孤岛问题**自动消失**：每张卡都属于某一节、
+      每节属于某章、每章属于某课，任何节点都必然连在树上。而且信息量更大 ——
+      一眼能看出「Transformer 上堆了一大团，CRISPR 只有孤零零三张」。
+
+    ★ 为什么不是「同一章的卡两两相连」
+
+      一章 20 张卡就是 190 条边，力导向会糊成一团黑，而斥力本身已经是 O(n²)。
+      把章和节变成**真实节点**，边就退化成 O(n)：卡片挂在小节上，小节挂在章上，
+      章按 idx 连成链。力导向自然形成「每章一个恒星，卡片围着转，章之间连成
+      一串珠子」—— 视觉上就是一堆连在一起，但边数是线性的。
+
+    ★ 章之间按 idx 连成链，而不是都连到课程中心
+      那样能体现递进顺序，而顺序恰好是这套系统里最结构化的东西。
     """
 
     from app.models.card import CardLink
     from app.models.learning import ReviewState
 
-    cards = await scope.all(
-        scope.select(Card)
-        .where(Card.state == STATE_VAULT)
-        .order_by(Card.created_at)
-        .limit(limit)
-    )
-    if not cards:
-        return {"neurons": [], "synapses": [], "stats": {}, "generated_at": utcnow().isoformat()}
+    now = utcnow()
+    neurons: list[dict] = []
+    synapses: list[dict] = []
 
+    # ── 1. 课程结构 ──
+    rows = list(
+        (
+            await scope.session.execute(
+                select(Course, Chapter, Section)
+                .join(Chapter, Chapter.course_id == Course.id)
+                .join(Section, Section.chapter_id == Chapter.id)
+                .where(Course.user_id == scope.user_id)
+                .order_by(Course.created_at, Chapter.idx, Section.idx)
+            )
+        ).all()
+    )
+
+    # 哪几节收成过笔记 —— 决定小节的掌握程度加成
+    noted_sections = set(
+        await scope.session.scalars(
+            scope.select(Card, Card.source_section_id).where(
+                Card.kind == KIND_NOTE,
+                Card.state != STATE_ARCHIVED,
+                Card.source_section_id.is_not(None),
+            )
+        )
+    )
+
+    # 小节 → 所属课程，供卡片着色时沿用
+    course_of_section: dict[str, str] = {}
+    # 章 → 它的小节强度，用于聚合
+    sec_strength_of_chapter: dict[str, list[float]] = {}
+    chap_of_course: dict[str, list[str]] = {}
+    seen_course: dict[str, Course] = {}
+    seen_chapter: dict[str, tuple[Chapter, Course]] = {}
+
+    for course, chapter, section in rows:
+        course_of_section[section.id] = course.id
+        seen_course.setdefault(course.id, course)
+        if chapter.id not in seen_chapter:
+            seen_chapter[chapter.id] = (chapter, course)
+            chap_of_course.setdefault(course.id, []).append(chapter.id)
+
+        learned = bool(section.content_md)
+        strength = 0.0
+        if learned:
+            strength = SEC_DONE if section.completed_at else SEC_READ
+            if section.id in noted_sections:
+                strength = min(1.0, strength + SEC_NOTE_BONUS)
+        sec_strength_of_chapter.setdefault(chapter.id, []).append(strength)
+
+        neurons.append(
+            {
+                "id": P_SECTION + section.id,
+                "kind": NODE_SECTION,
+                "label": section.summary or section.title,
+                "term": f"{chapter.idx + 1}.{section.idx + 1} {section.title}",
+                "depth": 0,
+                "rewritten": section.id in noted_sections,  # 写过笔记的那一节
+                "touch": section.regenerate_count,
+                "degree": 0,
+                "strength": round(strength, 3),
+                "due": False,
+                "learned": learned,
+                "reps": 0,
+                "created_at": (section.generated_at or course.created_at).isoformat(),
+                "course_id": course.id,
+                "tags": [str(k) for k in (section.key_concepts or [])][:4],
+                # 前端点它跳讲解页
+                "route": f"/courses/{course.id}/sections/{section.id}",
+            }
+        )
+        synapses.append(
+            {"a": P_CHAPTER + chapter.id, "b": P_SECTION + section.id, "kind": "structure"}
+        )
+
+    for chapter_id, (chapter, course) in seen_chapter.items():
+        vals = sec_strength_of_chapter.get(chapter_id) or [0.0]
+        neurons.append(
+            {
+                "id": P_CHAPTER + chapter_id,
+                "kind": NODE_CHAPTER,
+                "label": chapter.summary or chapter.title,
+                "term": f"第 {chapter.idx + 1} 章 {chapter.title}",
+                "depth": 0,
+                "rewritten": False,
+                "touch": 0,
+                "degree": 0,
+                "strength": round(sum(vals) / len(vals), 3),
+                "due": False,
+                "learned": any(v > 0 for v in vals),
+                "reps": 0,
+                "created_at": course.created_at.isoformat(),
+                "course_id": course.id,
+                "tags": [],
+                "route": f"/courses/{course.id}",
+            }
+        )
+
+    for course_id, course in seen_course.items():
+        chapter_ids = chap_of_course.get(course_id) or []
+        vals = [
+            sum(sec_strength_of_chapter.get(ch) or [0.0])
+            / max(len(sec_strength_of_chapter.get(ch) or [1]), 1)
+            for ch in chapter_ids
+        ] or [0.0]
+        neurons.append(
+            {
+                "id": P_COURSE + course_id,
+                "kind": NODE_COURSE,
+                "label": course.description or course.topic,
+                "term": course.title or course.topic,
+                "depth": 0,
+                "rewritten": False,
+                "touch": 0,
+                "degree": 0,
+                "strength": round(sum(vals) / len(vals), 3),
+                "due": False,
+                "learned": any(v > 0 for v in vals),
+                "reps": 0,
+                "created_at": course.created_at.isoformat(),
+                "course_id": course_id,
+                "tags": [],
+                "route": f"/courses/{course_id}",
+            }
+        )
+        # 课程连到第一章，章之间按 idx 连成链 —— 一门课看起来像一串珠子
+        if chapter_ids:
+            synapses.append(
+                {"a": P_COURSE + course_id, "b": P_CHAPTER + chapter_ids[0], "kind": "structure"}
+            )
+        for a, b in zip(chapter_ids, chapter_ids[1:], strict=False):
+            synapses.append({"a": P_CHAPTER + a, "b": P_CHAPTER + b, "kind": "spine"})
+
+    # ── 2. 卡片与笔记 ──
+    # 取**最新**的 card_limit 张。原来是 order_by(created_at).limit(800)，
+    # 拿的是最老的一批 —— 超过上限之后新学的东西反而不在网络里
+    cards = list(
+        reversed(
+            await scope.all(
+                scope.select(Card)
+                .where(Card.state == STATE_VAULT)
+                .order_by(Card.created_at.desc())
+                .limit(card_limit)
+            )
+        )
+    )
     ids = [c.id for c in cards]
     id_set = set(ids)
 
     review = {
         r.card_id: r
-        for r in await scope.all(
-            select(ReviewState).where(
-                ReviewState.user_id == scope.user_id, ReviewState.card_id.in_(ids)
+        for r in (
+            await scope.all(
+                select(ReviewState).where(
+                    ReviewState.user_id == scope.user_id, ReviewState.card_id.in_(ids)
+                )
             )
+            if ids
+            else []
         )
     }
-    links = await scope.all(
-        scope.select(CardLink).where(
-            CardLink.from_card_id.in_(ids),
-            CardLink.to_card_id.in_(ids),
-            CardLink.dismissed_at.is_(None),
+    links = (
+        await scope.all(
+            scope.select(CardLink).where(
+                CardLink.from_card_id.in_(ids),
+                CardLink.to_card_id.in_(ids),
+                CardLink.dismissed_at.is_(None),
+            )
         )
+        if ids
+        else []
     )
 
-    # 课程归属：用于按学科分组着色
-    section_ids = {c.source_section_id for c in cards if c.source_section_id}
-    course_of: dict[str, str] = {}
-    if section_ids:
-        rows = await scope.session.execute(
-            select(Section.id, Course.id, Course.title)
-            .join(Chapter, Chapter.id == Section.chapter_id)
-            .join(Course, Course.id == Chapter.course_id)
-            .where(Section.id.in_(section_ids), Course.user_id == scope.user_id)
-        )
-        course_of = {sid: cid for sid, cid, _ in rows}
-
-    now = utcnow()
-    degree: dict[str, int] = {c.id: 0 for c in cards}
-    for c in cards:
-        if c.parent_card_id in id_set:
-            degree[c.id] += 1
-            degree[c.parent_card_id] += 1
-    for link in links:
-        degree[link.from_card_id] += 1
-        degree[link.to_card_id] += 1
-
-    neurons = []
     for c in cards:
         st = review.get(c.id)
-        # 记忆强度 → 亮度。stability 以天为单位，取对数压缩到 0~1
-        stability = float(st.stability or 0) if st else 0.0
-        strength = min(1.0, math.log1p(max(stability, 0)) / math.log1p(120))
-        due = bool(st and st.due_date <= now)
+        is_note = c.kind == KIND_NOTE
         neurons.append(
             {
-                "id": c.id,
+                "id": c.id,  # ★ 裸 id：召回点亮靠它
+                "kind": KIND_NOTE if is_note else "card",
                 "label": c.summary or c.selected_text or c.question[:30],
-                "term": c.selected_text,
+                "term": (c.question if is_note else c.selected_text) or c.question[:30],
                 "depth": c.depth,
                 "rewritten": c.is_rewritten,
                 "touch": c.touch_count,
-                "degree": degree.get(c.id, 0),
-                "strength": round(strength, 3),
-                "due": due,
-                # 无连接、无子卡、久未触碰 → 濒临遗忘，视觉上几乎熄灭
-                "isolated": degree.get(c.id, 0) == 0,
+                "degree": 0,
+                "strength": round(_card_strength(st), 3),
+                "due": bool(st and st.due_date <= now),
+                "learned": True,  # 存在即学过
                 "reps": st.reps if st else 0,
                 "created_at": c.created_at.isoformat(),
-                "course_id": course_of.get(c.source_section_id or "", ""),
+                "course_id": course_of_section.get(c.source_section_id or "", ""),
                 "tags": list(c.concept_tags or [])[:4],
+                "route": "",  # 卡片走 Modal，不跳页
             }
         )
+        # 根卡挂在它所属的小节上；子卡靠父子链挂上去，不重复连
+        if c.parent_card_id is None and c.source_section_id in course_of_section:
+            synapses.append(
+                {"a": P_SECTION + c.source_section_id, "b": c.id, "kind": "origin"}
+            )
 
-    synapses = [
+    synapses += [
         {"a": c.parent_card_id, "b": c.id, "kind": "parent"}
         for c in cards
         if c.parent_card_id in id_set
-    ] + [
+    ]
+    synapses += [
         {
             "a": link.from_card_id,
             "b": link.to_card_id,
@@ -577,23 +756,41 @@ async def memory_network(scope: UserScope, limit: int = 800) -> dict:
         for link in links
     ]
 
-    strengths = [n["strength"] for n in neurons]
-    isolated = sum(1 for n in neurons if n["isolated"])
+    if not neurons:
+        return {"neurons": [], "synapses": [], "stats": {}, "generated_at": now.isoformat()}
+
+    # ── 3. 度数（连线粗细与节点大小都用它）──
+    degree: dict[str, int] = {n["id"]: 0 for n in neurons}
+    for s in synapses:
+        if s["a"] in degree:
+            degree[s["a"]] += 1
+        if s["b"] in degree:
+            degree[s["b"]] += 1
+    for n in neurons:
+        n["degree"] = degree.get(n["id"], 0)
+
+    by_kind: dict[str, int] = {}
+    for n in neurons:
+        by_kind[n["kind"]] = by_kind.get(n["kind"], 0) + 1
+    lit = [n for n in neurons if n["learned"]]
+    strengths = [n["strength"] for n in lit] or [0.0]
+
     return {
         "neurons": neurons,
         "synapses": synapses,
         "stats": {
             "neurons": len(neurons),
+            "by_kind": by_kind,
+            # 已点亮 = 真的学过/记下的；未点亮的小节是「还没走到的地方」，
+            # 它们淡着，本身就是行动指引 —— 不该算进「我有多少知识」
+            "lit": len(lit),
             "synapses": len(synapses),
             "rewritten": sum(1 for n in neurons if n["rewritten"]),
             "due": sum(1 for n in neurons if n["due"]),
-            "isolated": isolated,
-            "isolation_rate": round(isolated / len(neurons), 3),
             "avg_strength": round(sum(strengths) / len(strengths), 3),
             "max_depth": max((n["depth"] for n in neurons), default=0),
-            "density": round(len(synapses) / max(len(neurons), 1), 2),
         },
-        "generated_at": utcnow().isoformat(),
+        "generated_at": now.isoformat(),
     }
 
 

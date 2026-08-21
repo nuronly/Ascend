@@ -8,6 +8,7 @@ import { reportGuideStep } from '@/lib/guide'
 import { useIsDark } from '@/lib/useTheme'
 import { Markdown } from '@/components/Markdown'
 import { NeuralNetwork, type NeuralHandle } from '@/components/NeuralNetwork'
+import type { Body as NeuralNode } from '@/lib/neural'
 import RunTimeline from '@/components/RunTimeline'
 import { settleStep, toolStep, type ToolStep } from '@/lib/tools'
 import { Badge, Button, Modal, Segmented, Spinner, Textarea } from '@/components/ui'
@@ -202,7 +203,23 @@ export default function BrainPage() {
     netRef.current?.focus(id)
   }
 
-  const stats = network?.stats ?? {}
+  /**
+   * 点中网络里的一个节点。
+   *
+   * 结构节点（课程/章/节）跳去那个地方，卡片与笔记开 Modal。
+   * ★ 未点亮的小节尤其值得能点进去 —— 那正是「还没走到的地方」，
+   *   点它就开始学，这张图于此从展示变成入口。
+   */
+  const openNode = (node: NeuralNode) => {
+    if (node.route) {
+      nav(node.route)
+      return
+    }
+    void openCard(node.id)
+  }
+
+  const stats = (network?.stats ?? {}) as Record<string, number>
+  const byKind = ((network?.stats as any)?.by_kind ?? {}) as Record<string, number>
   const showNet = view !== 'chat'
   const showChat = view !== 'net'
 
@@ -228,20 +245,26 @@ export default function BrainPage() {
 
         {!!stats.neurons && (
           <div className="flex items-center gap-3.5 text-[11.5px] text-[var(--text-muted)] tabular-nums">
-            <span>
+            <span
+              title={`课程 ${byKind.course ?? 0} · 章 ${byKind.chapter ?? 0} · 小节 ${
+                byKind.section ?? 0
+              } · 笔记 ${byKind.note ?? 0} · 疑问卡 ${byKind.card ?? 0}`}
+            >
               <b className="text-[var(--text)]">{stats.neurons}</b> 神经元
+            </span>
+            {/* 已点亮才是「我真的有的知识」；淡着的小节是还没走到的地方 */}
+            <span title="真的学过 / 记下过的节点。淡着的是还没走到的地方">
+              已点亮 <b className="text-[var(--text)]">{stats.lit ?? 0}</b>
             </span>
             <span>
               <b className="text-[var(--text)]">{stats.synapses}</b> 突触
             </span>
-            <span title="平均记忆强度，来自 FSRS">
-              强度 <b className="text-[var(--text)]">{Math.round((stats.avg_strength ?? 0) * 100)}%</b>
+            <span title="卡片来自 FSRS 记忆强度，小节来自学习进度；只统计已点亮的">
+              牢固度{' '}
+              <b className="text-[var(--text)]">
+                {Math.round((stats.avg_strength ?? 0) * 100)}%
+              </b>
             </span>
-            {!!stats.isolated && (
-              <span className="text-[var(--text-subtle)]" title="无任何连接、濒临遗忘的卡">
-                孤岛 {stats.isolated}
-              </span>
-            )}
           </div>
         )}
 
@@ -273,7 +296,7 @@ export default function BrainPage() {
               data={network ?? null}
               loading={loadingNet}
               timeline={timeline}
-              onSelect={openCard}
+              onSelect={openNode}
               className="absolute inset-0"
             />
 
@@ -293,13 +316,18 @@ export default function BrainPage() {
               </div>
             )}
 
-            {/* 图例。颜色必须取自当前调色板，否则切主题后图例和画面对不上 */}
+            {/* 图例。颜色必须取自当前调色板，否则切主题后图例和画面对不上。
+                「孤岛（濒临遗忘）」这一条已撤 —— 骨架换成课程结构之后不存在孤岛，
+                而它当初把唯一那张永久笔记判成了濒临遗忘 */}
             <div className="absolute top-3 right-3 flex flex-col gap-1 text-[10px] text-[var(--text-subtle)] pointer-events-none">
               {[
-                [pal.nodeRewritten, '己见卡'],
+                [pal.nodeCourse, '课程'],
+                [pal.nodeChapter, '章'],
+                [pal.nodeSection, '小节'],
+                [pal.nodeNote, '笔记 / 己见'],
                 [pal.nodeDue, '待复习'],
-                [pal.node, 'AI 原生'],
-                [pal.nodeIsolated, '孤岛（濒临遗忘）'],
+                [pal.node, '疑问卡'],
+                [pal.nodeUnlit, '还没走到'],
               ].map(([c, t]) => (
                 <span key={t} className="flex items-center gap-1.5 justify-end">
                   {t}
@@ -351,18 +379,20 @@ export default function BrainPage() {
               </div>
             )}
 
-            {/* 网络还小时给个预期，别让人觉得功能坏了 */}
-            {!loadingNet && !!network?.neurons.length && network.neurons.length < 12 && (
+            {/* 点亮的还少时给个预期，别让人觉得一片灰是坏了。
+                判据换成 lit 而不是节点总数 —— 开一门课就有几十个结构节点，
+                但那时候真正学过的可能还是零 */}
+            {!loadingNet && !!network?.neurons.length && (stats.lit ?? 0) < 12 && (
               <div
                 className={cn(
                   FLOAT,
-                  'bottom-3 left-3 max-w-[260px] !rounded-[var(--radius)] pointer-events-none',
+                  'bottom-3 left-3 max-w-[264px] !rounded-[var(--radius)] pointer-events-none',
                 )}
               >
                 <div className="text-[11.5px] text-[var(--text-muted)] leading-relaxed">
-                  网络才 {network.neurons.length} 个神经元。
+                  已点亮 {stats.lit ?? 0} / {network.neurons.length}。
                   <span className="text-[var(--text-subtle)]">
-                    多学几节、多收几张卡，节点之间的聚类和孤岛会自己浮现出来。
+                    淡的是还没走到的地方 —— 读完一节、收一张卡，对应的节点就亮起来。
                   </span>
                 </div>
               </div>

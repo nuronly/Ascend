@@ -9,35 +9,68 @@
  *   · 力导向布局本身不到一百行，几百个节点 O(n²) 完全够用
  */
 
+/**
+ * ★ 神经元的五种类型 —— 结构本身就是知识单元
+ *
+ *   学完一节课就是获得了一块知识，这跟划词提问获得一块知识是同一件事，
+ *   而且正文是主干、卡片只是旁支。原来这张网只画卡片，于是一个认真读完
+ *   十二节但不怎么划词的人，网络里几乎是空的 —— 他明明学了很多。
+ */
+export type NeuronKind = 'course' | 'chapter' | 'section' | 'card' | 'note'
+
 export interface Neuron {
   id: string
+  kind: NeuronKind
   label: string
   term: string
   depth: number
   rewritten: boolean
   touch: number
   degree: number
-  /** 0~1，来自 FSRS stability —— 记得越牢越亮 */
+  /**
+   * 0~1 的牢固度。⚠️ 两种不同的量共用这一条通道：
+   *   卡片 / 笔记 → FSRS stability（真实复习记录）
+   *   小节 / 章 / 课 → 学习进度的粗略代理（读过 / 学完 / 收成笔记）
+   * 视觉上共用是刻意的（都在回答「这块知识有多牢」），
+   * 但 hover 文案必须分开说 —— 管小节叫「记忆强度」是撒谎。
+   */
   strength: number
   due: boolean
-  isolated: boolean
+  /** 已点亮 = 真的学过。未点亮的小节淡着，本身就是行动指引 */
+  learned: boolean
   reps: number
   created_at: string
   course_id: string
   tags: string[]
+  /** 点它去哪。卡片为空串 —— 卡片走 Modal，不跳页 */
+  route: string
 }
 
 export interface Synapse {
   a: string
   b: string
-  kind: 'parent' | 'real'
+  /**
+   * structure 课程/章→节的骨架 · spine 章与章的递进 ·
+   * origin 小节→挂在它上面的卡 · parent 追问的父子链 · real 用户手建
+   */
+  kind: 'structure' | 'spine' | 'origin' | 'parent' | 'real'
   relation?: string
 }
 
 export interface NetworkData {
   neurons: Neuron[]
   synapses: Synapse[]
-  stats: Record<string, number>
+  stats: Record<string, number | Record<string, number>>
+}
+
+/** 节点半径。层级越高越大 —— 课程是恒星，卡片是尘埃 */
+const BASE_RADIUS: Record<NeuronKind, number> = {
+  course: 9,
+  chapter: 6.4,
+  section: 4.4,
+  // 笔记比碎卡大一档：它是人工改写过、有完整语境的阅读单元
+  note: 5.2,
+  card: 3.2,
 }
 
 export interface Body extends Neuron {
@@ -94,7 +127,12 @@ export class NeuralLayout {
         y: cy + Math.sin(angle) * radius + (Math.random() - 0.5) * 12,
         vx: 0,
         vy: 0,
-        r: 3.2 + Math.min(neu.touch, 12) * 0.42 + Math.min(neu.degree, 8) * 0.34,
+        // 结构节点的大小由层级决定；卡片的大小由「被回想过多少次、连了多少东西」决定
+        r:
+          BASE_RADIUS[neu.kind] +
+          (neu.kind === 'card' || neu.kind === 'note'
+            ? Math.min(neu.touch, 12) * 0.42 + Math.min(neu.degree, 8) * 0.34
+            : Math.min(neu.degree, 10) * 0.18),
         act: 0,
         actKind: null,
         born: 0,
@@ -148,9 +186,22 @@ export class NeuralLayout {
       const dx = e.b.x - e.a.x
       const dy = e.b.y - e.a.y
       const d = Math.hypot(dx, dy) || 1
-      // 父子链拉得更紧：它表达的是确定的思维序列
-      const stiff = e.kind === 'parent' ? SPRING * 1.7 : e.kind === 'real' ? SPRING : SPRING * 0.4
-      const f = (d - SPRING_LEN) * stiff * this.alpha
+      // ★ 刚度决定了「一堆连在一起」这件事成不成立：
+      //   骨架（章→节）拉最紧，让一章的东西团成一颗恒星；
+      //   spine（章与章）松一点，让珠子串开而不是挤成一坨；
+      //   origin（节→卡）中等，卡片围着小节转；父子链紧，那是确定的思维序列
+      const stiff =
+        e.kind === 'structure'
+          ? SPRING * 2.2
+          : e.kind === 'spine'
+            ? SPRING * 0.5
+            : e.kind === 'parent'
+              ? SPRING * 1.7
+              : e.kind === 'origin'
+                ? SPRING * 1.2
+                : SPRING
+      const len = e.kind === 'spine' ? SPRING_LEN * 2.4 : SPRING_LEN
+      const f = (d - len) * stiff * this.alpha
       const fx = (dx / d) * f
       const fy = (dy / d) * f
       e.a.vx += fx
@@ -275,10 +326,21 @@ export interface Palette {
   edge: string
   edgeParent: string
   edgeReal: string
+  /** 课程/章→节的骨架线 */
+  edgeStructure: string
+  /** 章与章的递进（主干），比骨架显眼一档 —— 它就是学习路径 */
+  edgeSpine: string
   node: string
   nodeRewritten: string
   nodeDue: string
-  nodeIsolated: string
+  nodeCourse: string
+  nodeChapter: string
+  nodeSection: string
+  nodeNote: string
+  /** 还没走到的小节：淡到接近背景，是「待点亮」而不是「濒临遗忘」 */
+  nodeUnlit: string
+  /** 结构节点的标签文字 */
+  labelText: string
   actFulltext: string
   actVector: string
   actGraph: string
@@ -295,11 +357,18 @@ export const LIGHT_PALETTE: Palette = {
   edge: 'rgba(100, 116, 139, 0.12)',
   edgeParent: 'rgba(100, 116, 139, 0.30)',
   edgeReal: 'rgba(217, 119, 6, 0.55)',
+  edgeStructure: 'rgba(100, 116, 139, 0.22)',
+  edgeSpine: 'rgba(71, 85, 105, 0.42)',
   node: '#7ba3d8',
   nodeRewritten: '#2fa37a',
   nodeDue: '#e0883a',
-  // 孤岛卡在白底上"淡到几乎看不见"，与深底上"几乎熄灭"是同一个意思
-  nodeIsolated: '#d3d9e2',
+  nodeCourse: '#5b6b8c',
+  nodeChapter: '#7a86a8',
+  nodeSection: '#93a7c6',
+  nodeNote: '#2fa37a',
+  // 未点亮在白底上"淡到几乎看不见"，与深底上"还没亮起来"是同一个意思
+  nodeUnlit: '#dde2ea',
+  labelText: 'rgba(51, 65, 85, 0.82)',
   actFulltext: '#1e3a8a',
   actVector: '#2563eb',
   actGraph: '#7c3aed',
@@ -314,10 +383,17 @@ export const DARK_PALETTE: Palette = {
   edge: 'rgba(148, 163, 200, 0.10)',
   edgeParent: 'rgba(148, 163, 200, 0.20)',
   edgeReal: 'rgba(214, 154, 74, 0.55)',
+  edgeStructure: 'rgba(148, 163, 200, 0.16)',
+  edgeSpine: 'rgba(180, 195, 230, 0.34)',
   node: '#4a5875',
   nodeRewritten: '#3f8f70',
   nodeDue: '#c8813c',
-  nodeIsolated: '#242a36',
+  nodeCourse: '#8fa4d4',
+  nodeChapter: '#6b7ba0',
+  nodeSection: '#55637f',
+  nodeNote: '#3f8f70',
+  nodeUnlit: '#1c2230',
+  labelText: 'rgba(200, 212, 236, 0.78)',
   actFulltext: '#e8eefc',
   actVector: '#6fa8ff',
   actGraph: '#a78bfa',
@@ -326,11 +402,53 @@ export const DARK_PALETTE: Palette = {
   glow: 10,
 }
 
+/**
+ * 节点颜色。
+ *
+ * ★ 优先级的教训：原来 isolated 排在最前面，压过 due 和 rewritten ——
+ *   于是唯一那张永久笔记（degree 恒为 0，因为没人给笔记连线）被画成
+ *   「濒临遗忘」的最暗一档，明明它是 due=True 且是系统里最有价值的单元。
+ *   现在 isolated 这个概念整个撤掉了（骨架化之后不存在孤岛），
+ *   顶替它的 unlit 只对**还没走到的小节**成立 —— 那是「待点亮」，不是「快忘了」。
+ */
 export function neuronColor(b: Body, p: Palette): string {
-  if (b.isolated) return p.nodeIsolated
-  if (b.due) return p.nodeDue
-  if (b.rewritten) return p.nodeRewritten
-  return p.node
+  if (!b.learned) return p.nodeUnlit
+  switch (b.kind) {
+    case 'course':
+      return p.nodeCourse
+    case 'chapter':
+      return p.nodeChapter
+    case 'section':
+      // 收成过笔记的那一节，用己见色标出来 —— 亲手写过的地方最值得回访
+      return b.rewritten ? p.nodeRewritten : p.nodeSection
+    case 'note':
+      return p.nodeNote
+    default:
+      if (b.due) return p.nodeDue
+      if (b.rewritten) return p.nodeRewritten
+      return p.node
+  }
+}
+
+/** 突触颜色。 */
+export function synapseColor(kind: Synapse['kind'], p: Palette): string {
+  switch (kind) {
+    case 'spine':
+      return p.edgeSpine
+    case 'structure':
+      return p.edgeStructure
+    case 'real':
+      return p.edgeReal
+    case 'parent':
+      return p.edgeParent
+    default:
+      return p.edge
+  }
+}
+
+/** hover 卡上「牢固度」该叫什么 —— 小节没有复习记录，不能管它叫记忆强度。 */
+export function strengthLabel(kind: NeuronKind): string {
+  return kind === 'card' || kind === 'note' ? '记忆强度' : '掌握程度'
 }
 
 export function activationColor(kind: Body['actKind'], p: Palette): string {
