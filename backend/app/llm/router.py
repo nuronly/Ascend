@@ -896,6 +896,8 @@ async def stream_chat(
         sink: dict[str, list[ToolCall]] = {}
         # 每轮一个闸门：把「工具调用被写成正文」的那一段掐在到用户之前
         gate = _LeakGate()
+        # 扣住的结束信号。它必须是本轮**最后**一个 yield —— 见下面 chunk.done 处
+        done_chunk: StreamChunk | None = None
 
         async for chunk in _stream_round(
             convo,
@@ -927,14 +929,23 @@ async def stream_chat(
                     )
                 continue
             if chunk.done:
-                # done 之前把尾部窗口吐干净，否则最后 24 个字会被吃掉
-                if tail := gate.flush():
-                    yield StreamChunk(
-                        delta=tail, model=chunk.model, provider=chunk.provider
-                    )
+                # ★★ done 必须扣住，绝不能当场 yield ★★
+                #
+                #   下游（brain.answer_stream / course 等）一律是
+                #   `if chunk.done: break` —— 而 `break` 会 aclose() 这个
+                #   async generator，于是**本函数后面的代码一行都不会执行**。
+                #   我把「泄漏判断 + 补救」写在 yield done 之后，结果就是：
+                #   闸门确实拦住了泄漏（320 字全掐掉），但 log.error 没打出来、
+                #   补救没触发，用户拿到一片空白 —— 而且一条日志都没有，
+                #   查的时候完全无从下手。
+                #
+                #   在流式管道里，「结束信号」必须是最后一个动作。
+                done_chunk = chunk
+                continue
             yield chunk
 
-        if tail := gate.flush():  # 这一轮没走到 done（要去调工具）也得收尾
+        # 尾部窗口先放行（不管这一轮是正常收尾还是要去调工具）
+        if tail := gate.flush():
             yield StreamChunk(delta=tail)
 
         if gate.tripped:
@@ -981,20 +992,23 @@ async def stream_chat(
                         )
                     continue
                 if chunk.done:
-                    if tail := rescue.flush():
-                        yield StreamChunk(
-                            delta=tail, model=chunk.model, provider=chunk.provider
-                        )
+                    done_chunk = chunk  # 同样扣住，补救轮的收尾也在它之后
+                    continue
                 yield chunk
             if tail := rescue.flush():
                 yield StreamChunk(delta=tail)
             if not rescue.emitted:
                 # 连补救轮都收不住 —— 宁可明确报错，也不能让用户对着空白猜
                 raise LLMError(f"模型反复把工具调用当正文输出，无法收敛（{scene}）")
+            if done_chunk is not None:
+                yield done_chunk
             return
 
         if not calls or not tools:
-            return  # 本轮就是最终输出，done 已经由 _stream_round 发出
+            # 本轮就是最终输出。结束信号放到最后 —— 前面的收尾都做完了
+            if done_chunk is not None:
+                yield done_chunk
+            return
 
         # ★ 最后一轮即使模型还是发了 tool_calls，也绝不执行。
         #   tool_choice="none" 是「请别用」而不是硬约束，模型可以不听（实测
@@ -1007,6 +1021,8 @@ async def stream_chat(
                 "[%s] 最后一轮仍发起了 %s 个工具调用（tool_choice=none 未被遵守），已忽略",
                 scene, len(calls),
             )
+            if done_chunk is not None:
+                yield done_chunk
             return
 
         # 预算每轮重查：一轮 loop 就是一次完整的模型往返，

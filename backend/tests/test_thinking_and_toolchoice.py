@@ -602,6 +602,124 @@ class Test泄漏把正文吃光时的补救:
         assert trips == 2, "两轮跑完就该收尾，不追加补救轮"
 
 
+class Test结束信号必须最后发:
+    """★ 这一条守的是让上面所有补救逻辑**整体失效**的那个错。
+
+    下游一律这么消费：
+
+        async for chunk in stream_chat(...):
+            if chunk.done:
+                break
+
+    而 `break` 会 aclose() 这个 async generator —— 于是 stream_chat 里
+    写在 `yield done` **之后**的代码一行都不会执行。
+
+    我就是这么栽的：闸门确实把泄漏拦住了（320 字全掐掉），但 log.error 没打、
+    补救没触发，用户拿到一片空白，而且**日志里一条记录都没有** ——
+    查的时候先怀疑日志没落盘、再怀疑 logger 没配 handler、又怀疑 max_tokens
+    被吃光，绕了三圈才发现是「收尾写在了通知结束之后」。
+
+    所以这里刻意用**真实消费者的姿势**测（见 done 就 break），
+    而不是把 chunk 全收下来 —— 后者恰好测不出这个错。
+    """
+
+    def _consume_like_downstream(self, script: list[list[StreamChunk]]) -> str:
+        """照 brain.answer_stream 的样子消费：见 done 就 break。"""
+        it = iter(script)
+
+        async def fake_round(convo, sink, **kw):
+            try:
+                chunks = next(it)
+            except StopIteration:
+                yield StreamChunk(done=True)
+                return
+            for c in chunks:
+                if c.tool_calls:
+                    sink["calls"] = c.tool_calls
+                    return
+                yield c
+
+        async def noop(*_a, **_kw):
+            return None
+
+        real = (router._stream_round, router.check_budget)
+        router._stream_round = fake_round  # type: ignore[assignment]
+        router.check_budget = noop  # type: ignore[assignment]
+
+        async def go() -> str:
+            out = ""
+            async for ch in router.stream_chat(
+                [Message(role="user", content="hi")], scene="verify",
+                tools=[_T()], max_rounds=1,
+            ):
+                if ch.done:
+                    break  # ★ 真实下游就是这么写的
+                out += ch.delta
+            return out
+
+        try:
+            return asyncio.run(go())
+        finally:
+            router._stream_round, router.check_budget = real  # type: ignore[assignment]
+
+    def test_下游见_done_就_break_时补救仍然生效(self):
+        """把 done 当场 yield 的那一版，这里会拿到空字符串。"""
+        got = self._consume_like_downstream([
+            [StreamChunk(delta=_BAD), StreamChunk(done=True)],
+            [StreamChunk(delta="补救之后的回答。"), StreamChunk(done=True)],
+        ])
+        assert got == "补救之后的回答。", "done 被提前 yield，补救逻辑就被 break 掉了"
+
+    def test_下游见_done_就_break_时正常回答也完整(self):
+        """扣住 done 不能反过来把正常路径的尾部弄丢。"""
+        got = self._consume_like_downstream([
+            [StreamChunk(delta=_GOOD), StreamChunk(done=True)],
+        ])
+        assert got == _GOOD
+
+    def test_done_是最后一个_chunk(self):
+        """全收下来的姿势：done 之后不该再有任何东西。"""
+        it = iter([
+            [StreamChunk(delta=_BAD), StreamChunk(done=True)],
+            [StreamChunk(delta="补救。"), StreamChunk(done=True)],
+        ])
+
+        async def fake_round(convo, sink, **kw):
+            try:
+                chunks = next(it)
+            except StopIteration:
+                yield StreamChunk(done=True)
+                return
+            for c in chunks:
+                yield c
+
+        async def noop(*_a, **_kw):
+            return None
+
+        real = (router._stream_round, router.check_budget)
+        router._stream_round = fake_round  # type: ignore[assignment]
+        router.check_budget = noop  # type: ignore[assignment]
+
+        async def go() -> list[StreamChunk]:
+            return [
+                ch
+                async for ch in router.stream_chat(
+                    [Message(role="user", content="hi")], scene="verify",
+                    tools=[_T()], max_rounds=1,
+                )
+            ]
+
+        try:
+            got = asyncio.run(go())
+        finally:
+            router._stream_round, router.check_budget = real  # type: ignore[assignment]
+
+        dones = [i for i, c in enumerate(got) if c.done]
+        assert dones, "总得有一个结束信号"
+        assert dones[-1] == len(got) - 1, "done 之后还有 chunk —— 下游会漏掉它们"
+        assert "".join(c.delta for c in got) == "补救。"
+
+
 def _独立运行() -> int:
     import inspect
     import traceback
@@ -615,6 +733,7 @@ def _独立运行() -> int:
         Test泄漏闸门,
         Test闸门的接线,
         Test泄漏把正文吃光时的补救,
+        Test结束信号必须最后发,
     ):
         print(f"\n{cls.__name__}")
         inst = cls()
