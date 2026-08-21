@@ -344,6 +344,35 @@ class Test截断方向:
         # c9 最新、c0 最老 —— 留下的必须是尾三张
         assert _ids(net, "card") == ["c7", "c8", "c9"]
 
+    def test_超限时丢未点亮的小节_但章上的进度还在(self):
+        """力导向是 O(n²)。20 门课 × 40 节 + 900 张卡 = 140 万次配对/帧，
+        画面直接卡死。丢未点亮的小节不会失真 —— 它们所属的章还在，
+        章上带着「已学 2/24 节」，「还有多少没走」这个信息不丢。"""
+        co = _course()
+        ch = _chapter("ch1", 0, "基础")
+        rows = [(co, ch, _section("s0", "ch1", 0, "学过的", content_md="正文"))]
+        rows += [(co, ch, _section(f"u{i}", "ch1", i + 1, f"没走到 {i}")) for i in range(40)]
+        scope = FakeScope(rows=rows, cards=[])
+        real = svc.NODE_BUDGET
+        svc.NODE_BUDGET = 12
+        try:
+            net = asyncio.run(svc.memory_network(scope))  # type: ignore[arg-type]
+        finally:
+            svc.NODE_BUDGET = real
+
+        assert len(net["neurons"]) <= 12
+        assert net["stats"]["folded"] > 0
+        # 学过的那一节绝不能被丢
+        assert "sec:s0" in _ids(net, "section")
+        # 章上的进度是「还有多少没走」唯一的载体
+        chap = next(n for n in net["neurons"] if n["id"] == "ch:ch1")
+        assert chap["total"] == 41
+        assert chap["lit"] == 1
+        # 边必须同步清掉：悬空的边会被力导向静默丢弃，表现成「连线时有时无」
+        ids = {n["id"] for n in net["neurons"]}
+        for s in net["synapses"]:
+            assert s["a"] in ids and s["b"] in ids, s
+
     def test_按时间升序返回_时间轴回放才对(self):
         """前端时间轴按 created_at 切，倒序会让回放从最新开始。"""
         old = _card(id="old", created_at=NOW - timedelta(days=5), source_section_id="s1")

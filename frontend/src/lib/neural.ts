@@ -44,6 +44,9 @@ export interface Neuron {
   tags: string[]
   /** 点它去哪。卡片为空串 —— 卡片走 Modal，不跳页 */
   route: string
+  /** 结构节点：已点亮 / 共几节。一门整个灰着的课 hover 会看到 0/24 */
+  lit?: number
+  total?: number
 }
 
 export interface Synapse {
@@ -127,12 +130,16 @@ export class NeuralLayout {
         y: cy + Math.sin(angle) * radius + (Math.random() - 0.5) * 12,
         vx: 0,
         vy: 0,
-        // 结构节点的大小由层级决定；卡片的大小由「被回想过多少次、连了多少东西」决定
+        // 结构节点的大小由层级决定；卡片的大小由「被回想过多少次、连了多少东西」决定。
+        // ★ 还没走到的地方压到四成半：实测一个开了 8 门课的账号有 240 个小节、
+        //   只点亮 8 个 —— 若同样大小，画面就是一片灰点，学过的部分被淹没。
+        //   压小之后未走的部分退成一层薄雾，主体是亮的那些
         r:
-          BASE_RADIUS[neu.kind] +
-          (neu.kind === 'card' || neu.kind === 'note'
-            ? Math.min(neu.touch, 12) * 0.42 + Math.min(neu.degree, 8) * 0.34
-            : Math.min(neu.degree, 10) * 0.18),
+          (BASE_RADIUS[neu.kind] +
+            (neu.kind === 'card' || neu.kind === 'note'
+              ? Math.min(neu.touch, 12) * 0.42 + Math.min(neu.degree, 8) * 0.34
+              : Math.min(neu.degree, 10) * 0.18)) *
+          (neu.learned ? 1 : 0.45),
         act: 0,
         actKind: null,
         born: 0,

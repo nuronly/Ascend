@@ -510,6 +510,15 @@ def _card_strength(st: Any) -> float:
     return min(1.0, math.log1p(max(stability, 0)) / math.log1p(120))
 
 
+# 节点总量上限。
+# ★ 力导向是 O(n²)（neural.ts 里有 300px 的距离剪枝，但量级不变）。
+#   317 个节点约 5 万次配对/帧，还跑得动；20 门课 × 40 节 + 900 张卡 = 1700 个
+#   节点就是 140 万次/帧，画面直接卡死。
+#   超限时**先丢未点亮的小节** —— 它们信息量最低，而且丢了也不会失真：
+#   它们所属的章还在，章上带着「已学 2/24 节」，「还有多少没走」这个信息不丢。
+NODE_BUDGET = 620
+
+
 async def memory_network(scope: UserScope, card_limit: int = 900) -> dict:
     """整张记忆网络的快照。
 
@@ -634,6 +643,10 @@ async def memory_network(scope: UserScope, card_limit: int = 900) -> dict:
                 "course_id": course.id,
                 "tags": [],
                 "route": f"/courses/{course.id}",
+                # 「已学 2/6 节」。超限丢掉未点亮的小节后，这个数字就是
+                # 「还有多少没走」唯一的载体，所以它必须在结构节点上
+                "lit": sum(1 for v in vals if v > 0),
+                "total": len(vals),
             }
         )
 
@@ -644,6 +657,7 @@ async def memory_network(scope: UserScope, card_limit: int = 900) -> dict:
             / max(len(sec_strength_of_chapter.get(ch) or [1]), 1)
             for ch in chapter_ids
         ] or [0.0]
+        secs = [v for ch in chapter_ids for v in (sec_strength_of_chapter.get(ch) or [])]
         neurons.append(
             {
                 "id": P_COURSE + course_id,
@@ -662,6 +676,10 @@ async def memory_network(scope: UserScope, card_limit: int = 900) -> dict:
                 "course_id": course_id,
                 "tags": [],
                 "route": f"/courses/{course_id}",
+                # ★ 「开了 8 门课只真正走了 1 门」是个诚实且有用的提醒，
+                #   一门整个灰着的课 hover 上去会看到 0/24
+                "lit": sum(1 for v in secs if v > 0),
+                "total": len(secs),
             }
         )
         # 课程连到第一章，章之间按 idx 连成链 —— 一门课看起来像一串珠子
@@ -759,7 +777,22 @@ async def memory_network(scope: UserScope, card_limit: int = 900) -> dict:
     if not neurons:
         return {"neurons": [], "synapses": [], "stats": {}, "generated_at": now.isoformat()}
 
-    # ── 3. 度数（连线粗细与节点大小都用它）──
+    # ── 3. 超限降级：先丢未点亮的小节 ──
+    dropped_unlit = 0
+    if len(neurons) > NODE_BUDGET:
+        over = len(neurons) - NODE_BUDGET
+        # 未点亮的小节按「所在课程越荒废、越先丢」不划算：那会让荒废的课
+        # 彻底消失，而「你开了课没走」正是该看见的。所以就按大纲顺序丢尾部，
+        # 每门课都保留前面几节 —— 那几节才是他最可能接着学的
+        victims = [n["id"] for n in neurons if n["kind"] == NODE_SECTION and not n["learned"]]
+        doomed = set(victims[-over:]) if over < len(victims) else set(victims)
+        dropped_unlit = len(doomed)
+        neurons = [n for n in neurons if n["id"] not in doomed]
+        # 边必须同步清掉：悬空的边在力导向里被静默丢弃，
+        # 表现成「连线时有时无」，查起来毫无头绪
+        synapses = [s for s in synapses if s["a"] not in doomed and s["b"] not in doomed]
+
+    # ── 4. 度数（连线粗细与节点大小都用它）──
     degree: dict[str, int] = {n["id"]: 0 for n in neurons}
     for s in synapses:
         if s["a"] in degree:
@@ -784,6 +817,9 @@ async def memory_network(scope: UserScope, card_limit: int = 900) -> dict:
             # 已点亮 = 真的学过/记下的；未点亮的小节是「还没走到的地方」，
             # 它们淡着，本身就是行动指引 —— 不该算进「我有多少知识」
             "lit": len(lit),
+            # 因为超限被折叠掉的未点亮小节数。不显示出来的话，
+            # 「章上写着 2/24 但只画了 6 个点」会像个 bug
+            "folded": dropped_unlit,
             "synapses": len(synapses),
             "rewritten": sum(1 for n in neurons if n["rewritten"]),
             "due": sum(1 for n in neurons if n["due"]),

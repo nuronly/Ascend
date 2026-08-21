@@ -503,6 +503,12 @@ export const NeuralNetwork = forwardRef<NeuralHandle, Props>(function NeuralNetw
             ) : (
               <span className="opacity-80">还没走到这里</span>
             )}
+            {/* 一门整个灰着的课在这里显示 0/24 ——「开了课没走」该被看见 */}
+            {hovered.body.total !== undefined && hovered.body.total > 0 && (
+              <span>
+                已学 {hovered.body.lit ?? 0}/{hovered.body.total} 节
+              </span>
+            )}
             <span>连接 {hovered.body.degree}</span>
             {(hovered.body.kind === 'card' || hovered.body.kind === 'note') && (
               <span>回想 {hovered.body.touch} 次</span>
