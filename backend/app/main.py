@@ -281,6 +281,7 @@ from app.api import (  # noqa: E402
     export,
     feedback,
     guide,
+    pet,
     pomodoro,
     review,
     vault,
@@ -299,6 +300,7 @@ for r in (
     review.router,
     badges.router,
     guide.router,
+    pet.router,
     feedback.router,
     export.router,
 ):

@@ -632,6 +632,48 @@ body {
   animation: streak-pop 0.28s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+/* ── 桌宠 ──
+   三个动作就够：呼吸（活着）、天线晃（在想）、嘴动（在说）。
+   ⚠️ 呼吸周期刻意慢到 3.4 秒 —— 常驻在屏幕角上的东西，动得快就成了干扰，
+      而它的职责是陪着，不是抢注意力。 */
+@keyframes pet-breathe {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-1.5px) scale(1.012);
+  }
+}
+@keyframes pet-antenna {
+  0%,
+  100% {
+    transform: rotate(-7deg);
+  }
+  50% {
+    transform: rotate(7deg);
+  }
+}
+@keyframes pet-mouth {
+  0%,
+  100% {
+    transform: scaleY(1);
+  }
+  50% {
+    transform: scaleY(0.42);
+  }
+}
+.pet-breathe {
+  animation: pet-breathe 3.4s ease-in-out infinite;
+}
+.pet-antenna {
+  animation: pet-antenna 1.1s ease-in-out infinite;
+}
+.pet-mouth {
+  animation: pet-mouth 0.26s ease-in-out infinite;
+  transform-origin: center;
+}
+
 .animate-fade-up {
   animation: fade-up 0.22s cubic-bezier(0.16, 1, 0.3, 1);
 }

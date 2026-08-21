@@ -4,6 +4,7 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { queryClient } from './lib/queryClient'
 import { Layout } from './components/Layout'
 import { Toaster } from './components/Toaster'
+import DesktopPet from './components/DesktopPet'
 import { ErrorBoundary } from './components/ErrorBoundary'
 import { useAuth, usePomodoro } from './lib/store'
 import { Spinner } from './components/ui'
@@ -130,6 +131,11 @@ export default function App() {
                         <Route path="*" element={<Navigate to="/" replace />} />
                       </Routes>
                     </Page>
+                    {/* 桌宠挂在 Guard 里面、Page 外面：
+                        · 在 Guard 里 —— 它说的话全是「你的」学习状态，没登录时无从谈起
+                        · 在 Page 外面 —— 某个页面崩了它还在，而它恰好是那时候
+                          唯一还能用的入口（能问第二大脑、能跳走） */}
+                    <DesktopPet />
                   </Layout>
                 </Guard>
               }
