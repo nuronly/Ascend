@@ -66,14 +66,86 @@ export interface NetworkData {
   stats: Record<string, number | Record<string, number>>
 }
 
-/** 节点半径。层级越高越大 —— 课程是恒星，卡片是尘埃 */
-const BASE_RADIUS: Record<NeuronKind, number> = {
-  course: 9,
-  chapter: 6.4,
-  section: 4.4,
-  // 笔记比碎卡大一档：它是人工改写过、有完整语境的阅读单元
-  note: 5.2,
-  card: 3.2,
+/**
+ * 只留走过的地方。
+ *
+ * ★ 为什么默认要摘掉未点亮的
+ *   实测一个开了 8 门课的账号：240 个小节，真正走过 31 个。全画出来的话，
+ *   画面主体是两百个没有信息量的灰点，而学过的那一小片被淹在里面 ——
+ *   「开了课没走该被看见」这个判断是对的，但它该以**一个数字**的形式被看见
+ *   （开关上写着「还没走到 209」），不该以两百个点的形式占满整块画布。
+ *
+ * ⚠️ 不能只过滤节点，必须把骨架重接一遍
+ *   课程只连**第一章**，章之间按 idx 连成链。摘掉中间任意一章，链就断了；
+ *   要是第一章没走过，整门课会跟自己的章彻底断开。而悬空的边在
+ *   NeuralLayout 构造时被静默丢弃（index.get 拿不到就跳过）——
+ *   不报错，只表现为「连线时有时无」，查起来毫无头绪。
+ *   所以这里把 course→章、章→章 这两类边整段删掉，再按**原来的顺序**
+ *   在可见的章之间重连。顺序取自 spine 边本身，不依赖数组下标。
+ */
+export function pruneUnlit(data: NetworkData): NetworkData {
+  const unlit = data.neurons.filter((n) => !n.learned)
+  if (!unlit.length) return data
+
+  const kindOf = new Map(data.neurons.map((n) => [n.id, n.kind]))
+  const keep = new Set(data.neurons.filter((n) => n.learned).map((n) => n.id))
+
+  // 先按原始拓扑记下每门课的章顺序
+  const head = new Map<string, string>() // 课程 → 第一章
+  const next = new Map<string, string>() // 章 → 下一章
+  for (const s of data.synapses) {
+    if (s.kind === 'spine') next.set(s.a, s.b)
+    else if (s.kind === 'structure' && kindOf.get(s.a) === 'course') head.set(s.a, s.b)
+  }
+
+  const isSkeleton = (s: Synapse) =>
+    s.kind === 'spine' || (s.kind === 'structure' && kindOf.get(s.a) === 'course')
+
+  const synapses = data.synapses.filter(
+    (s) => keep.has(s.a) && keep.has(s.b) && !isSkeleton(s),
+  )
+
+  for (const [courseId, first] of head) {
+    if (!keep.has(courseId)) continue
+    // 沿链走一遍，收集还留着的章。visited 防的是数据异常导致的环
+    const chain: string[] = []
+    const visited = new Set<string>()
+    for (let ch: string | undefined = first; ch && !visited.has(ch); ch = next.get(ch)) {
+      visited.add(ch)
+      if (keep.has(ch)) chain.push(ch)
+    }
+    if (chain.length) synapses.push({ a: courseId, b: chain[0], kind: 'structure' })
+    for (let i = 0; i + 1 < chain.length; i++) {
+      synapses.push({ a: chain[i], b: chain[i + 1], kind: 'spine' })
+    }
+  }
+
+  return { ...data, neurons: data.neurons.filter((n) => keep.has(n.id)), synapses }
+}
+
+/**
+ * 节点的「体量」—— 它辖下有多少知识。
+ *
+ * 原来是每类一个基准半径（course 9 / chapter 6.4 / section 4.4 / …），
+ * 再叠上 degree 与 touch 的加成 —— 五个魔数、五档大小，配上五种颜色，
+ * 整张图看起来像一份图例展览而不是一张图。
+ *
+ * 现在只有一条规则：**辖下的知识越多，点越大。** 之所以不能直接用 degree
+ * （Obsidian 的做法），是因为课程节点只连第一章、章按 idx 连成链，
+ * 一门 240 节的课 degree 恒为 1 —— 纯按 degree 会把整门课画成最小的点。
+ * 结构节点用 total（辖下小节数），卡片才用 degree。
+ */
+export function nodeWeight(n: Neuron): number {
+  if (n.total !== undefined) return n.total
+  if (n.kind === 'card' || n.kind === 'note') return n.degree + Math.min(n.touch, 8) * 0.5
+  return n.degree
+}
+
+/** 半径。log 压缩 + 封顶，让 240 节的课只比一张卡大三倍，而不是大二十倍。 */
+export function nodeRadius(n: Neuron): number {
+  const r = 2.1 + Math.min(Math.log2(1 + Math.max(nodeWeight(n), 0)), 7) * 1.15
+  // 还没走到的地方压到一半：它是薄雾，不是主体
+  return n.learned ? r : r * 0.55
 }
 
 export interface Body extends Neuron {
@@ -130,16 +202,7 @@ export class NeuralLayout {
         y: cy + Math.sin(angle) * radius + (Math.random() - 0.5) * 12,
         vx: 0,
         vy: 0,
-        // 结构节点的大小由层级决定；卡片的大小由「被回想过多少次、连了多少东西」决定。
-        // ★ 还没走到的地方压到四成半：实测一个开了 8 门课的账号有 240 个小节、
-        //   只点亮 8 个 —— 若同样大小，画面就是一片灰点，学过的部分被淹没。
-        //   压小之后未走的部分退成一层薄雾，主体是亮的那些
-        r:
-          (BASE_RADIUS[neu.kind] +
-            (neu.kind === 'card' || neu.kind === 'note'
-              ? Math.min(neu.touch, 12) * 0.42 + Math.min(neu.degree, 8) * 0.34
-              : Math.min(neu.degree, 10) * 0.18)) *
-          (neu.learned ? 1 : 0.45),
+        r: nodeRadius(neu),
         act: 0,
         actKind: null,
         born: 0,
@@ -325,28 +388,31 @@ export class NeuralLayout {
  *      浅底：不能发光，改靠「饱和度」，弱记忆淡到接近背景
  *    所以激活色在深底是提亮（近白），在浅底必须是压深（深蓝紫），
  *    否则激活的瞬间节点会直接消失在白底里。
+ *
+ * ★ 色板刻意很短。曾经有过 nodeCourse / nodeChapter / nodeSection /
+ *   edgeStructure / edgeSpine / edgeParent 这些 —— 五种节点色配五种连线色，
+ *   每一条单独看都有道理（「让人看出这是章还是节」），叠在一起就是一张
+ *   图例展览：看图的人得先记住六种颜色才能开始看。
+ *   现在类型交给**大小和位置**去表达（章是它那团的中心，且天然更大），
+ *   颜色只留给三件需要**立刻行动**的事：这块要复习、这块我亲手写过、
+ *   这块还没走到。
  */
 export interface Palette {
   bg: string
   /** 拖尾用的半透明背景色，让信号有余晖 */
   trail: string
+  /** 所有系统自动生成的连线（骨架、递进、追问链）共用这一个颜色 */
   edge: string
-  edgeParent: string
+  /**
+   * 用户亲手拉的线。全库一共 3 条 —— 正因为稀少才留着强调色：
+   * 它是 real / potential 两层机制唯一看得见的产物，抹平了那机制就隐形了。
+   */
   edgeReal: string
-  /** 课程/章→节的骨架线 */
-  edgeStructure: string
-  /** 章与章的递进（主干），比骨架显眼一档 —— 它就是学习路径 */
-  edgeSpine: string
   node: string
   nodeRewritten: string
   nodeDue: string
-  nodeCourse: string
-  nodeChapter: string
-  nodeSection: string
-  nodeNote: string
-  /** 还没走到的小节：淡到接近背景，是「待点亮」而不是「濒临遗忘」 */
+  /** 还没走到的地方：淡到接近背景，是「待点亮」而不是「濒临遗忘」 */
   nodeUnlit: string
-  /** 结构节点的标签文字 */
   labelText: string
   actFulltext: string
   actVector: string
@@ -361,20 +427,13 @@ export interface Palette {
 export const LIGHT_PALETTE: Palette = {
   bg: '#f7f9fc',
   trail: 'rgba(247, 249, 252, 0.32)',
-  edge: 'rgba(100, 116, 139, 0.12)',
-  edgeParent: 'rgba(100, 116, 139, 0.30)',
+  edge: 'rgba(100, 116, 139, 0.18)',
   edgeReal: 'rgba(217, 119, 6, 0.55)',
-  edgeStructure: 'rgba(100, 116, 139, 0.22)',
-  edgeSpine: 'rgba(71, 85, 105, 0.42)',
-  node: '#7ba3d8',
+  node: '#8194b0',
   nodeRewritten: '#2fa37a',
   nodeDue: '#e0883a',
-  nodeCourse: '#5b6b8c',
-  nodeChapter: '#7a86a8',
-  nodeSection: '#93a7c6',
-  nodeNote: '#2fa37a',
   // 未点亮在白底上"淡到几乎看不见"，与深底上"还没亮起来"是同一个意思
-  nodeUnlit: '#dde2ea',
+  nodeUnlit: '#d3dae4',
   labelText: 'rgba(51, 65, 85, 0.82)',
   actFulltext: '#1e3a8a',
   actVector: '#2563eb',
@@ -387,20 +446,15 @@ export const LIGHT_PALETTE: Palette = {
 export const DARK_PALETTE: Palette = {
   bg: '#0b0e14',
   trail: 'rgba(11, 14, 20, 0.32)',
-  edge: 'rgba(148, 163, 200, 0.10)',
-  edgeParent: 'rgba(148, 163, 200, 0.20)',
+  edge: 'rgba(148, 163, 200, 0.16)',
   edgeReal: 'rgba(214, 154, 74, 0.55)',
-  edgeStructure: 'rgba(148, 163, 200, 0.16)',
-  edgeSpine: 'rgba(180, 195, 230, 0.34)',
-  node: '#4a5875',
+  // ★ 比原来（#4a5875）亮了一档：常态光晕已经撤掉，节点的可见度
+  //   现在完全靠自身颜色 × 透明度，底色太深会直接看不见
+  node: '#7c88a3',
   nodeRewritten: '#3f8f70',
   nodeDue: '#c8813c',
-  nodeCourse: '#8fa4d4',
-  nodeChapter: '#6b7ba0',
-  nodeSection: '#55637f',
-  nodeNote: '#3f8f70',
-  nodeUnlit: '#1c2230',
-  labelText: 'rgba(200, 212, 236, 0.78)',
+  nodeUnlit: '#2b3341',
+  labelText: 'rgba(206, 218, 240, 0.82)',
   actFulltext: '#e8eefc',
   actVector: '#6fa8ff',
   actGraph: '#a78bfa',
@@ -410,47 +464,25 @@ export const DARK_PALETTE: Palette = {
 }
 
 /**
- * 节点颜色。
+ * 节点颜色。只有三种状态值得一个颜色，其余全部是同一个中性色。
  *
  * ★ 优先级的教训：原来 isolated 排在最前面，压过 due 和 rewritten ——
  *   于是唯一那张永久笔记（degree 恒为 0，因为没人给笔记连线）被画成
  *   「濒临遗忘」的最暗一档，明明它是 due=True 且是系统里最有价值的单元。
  *   现在 isolated 这个概念整个撤掉了（骨架化之后不存在孤岛），
- *   顶替它的 unlit 只对**还没走到的小节**成立 —— 那是「待点亮」，不是「快忘了」。
+ *   顶替它的 unlit 只对**还没走到的地方**成立 —— 那是「待点亮」，不是「快忘了」。
  */
 export function neuronColor(b: Body, p: Palette): string {
   if (!b.learned) return p.nodeUnlit
-  switch (b.kind) {
-    case 'course':
-      return p.nodeCourse
-    case 'chapter':
-      return p.nodeChapter
-    case 'section':
-      // 收成过笔记的那一节，用己见色标出来 —— 亲手写过的地方最值得回访
-      return b.rewritten ? p.nodeRewritten : p.nodeSection
-    case 'note':
-      return p.nodeNote
-    default:
-      if (b.due) return p.nodeDue
-      if (b.rewritten) return p.nodeRewritten
-      return p.node
-  }
+  if (b.due) return p.nodeDue
+  // 笔记本身就是「亲手写过」的产物，和己见卡、收成过笔记的小节同一档
+  if (b.rewritten || b.kind === 'note') return p.nodeRewritten
+  return p.node
 }
 
-/** 突触颜色。 */
+/** 突触颜色。系统连的线全都一个样，只有亲手拉的线例外。 */
 export function synapseColor(kind: Synapse['kind'], p: Palette): string {
-  switch (kind) {
-    case 'spine':
-      return p.edgeSpine
-    case 'structure':
-      return p.edgeStructure
-    case 'real':
-      return p.edgeReal
-    case 'parent':
-      return p.edgeParent
-    default:
-      return p.edge
-  }
+  return kind === 'real' ? p.edgeReal : p.edge
 }
 
 /** hover 卡上「牢固度」该叫什么 —— 小节没有复习记录，不能管它叫记忆强度。 */

@@ -1,9 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, sse } from '@/lib/api'
 import type { Card, Citation } from '@/lib/types'
-import { DARK_PALETTE, LIGHT_PALETTE, type NetworkData } from '@/lib/neural'
+import { DARK_PALETTE, LIGHT_PALETTE, pruneUnlit, type NetworkData } from '@/lib/neural'
 import { reportGuideStep } from '@/lib/guide'
 import { useIsDark } from '@/lib/useTheme'
 import { Markdown } from '@/components/Markdown'
@@ -59,6 +59,14 @@ export default function BrainPage() {
   const [timeline, setTimeline] = useState(1)
   const [playing, setPlaying] = useState(false)
   const [view, setView] = useState<'split' | 'net' | 'chat'>('split')
+  /**
+   * 还没走到的地方要不要画出来。默认**不画**。
+   *
+   * 上一版默认全画，理由是「开了 8 门课只走了 1 门该被看见」—— 这话没错，
+   * 但代价是画面 3/4 是灰点，真正学过的那一小片被淹掉。
+   * 现在那句话由左下角的一个数字来说（「还没走到 209」），点一下才铺开。
+   */
+  const [showUnlit, setShowUnlit] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
   const netRef = useRef<NeuralHandle>(null)
@@ -223,6 +231,20 @@ export default function BrainPage() {
   const showNet = view !== 'chat'
   const showChat = view !== 'net'
 
+  /** 真正交给画布的那份数据。统计仍然用后端的原始口径 —— 那是事实，不该跟着视图变 */
+  const shown = useMemo(() => {
+    if (!network) return null
+    if (showUnlit) return network
+    const pruned = pruneUnlit(network)
+    // 一节都还没走的人（刚开了课）应该看见自己的课，而不是一片空白
+    return pruned.neurons.length ? pruned : network
+  }, [network, showUnlit])
+
+  // 还没走到的地方有多少。要把后端因为超限折叠掉的那些也算进来，
+  // 否则「章上写着已学 2/24，开关却说还没走到 4」看着像 bug
+  const unlitCount =
+    (network?.neurons.length ?? 0) - (stats.lit ?? 0) + (stats.folded ?? 0)
+
   return (
     <div className="h-full flex flex-col">
       <header className="shrink-0 px-6 py-3 border-b border-[var(--border)] flex flex-wrap items-center gap-3">
@@ -293,7 +315,7 @@ export default function BrainPage() {
           >
             <NeuralNetwork
               ref={netRef}
-              data={network ?? null}
+              data={shown}
               loading={loadingNet}
               timeline={timeline}
               onSelect={openNode}
@@ -317,17 +339,15 @@ export default function BrainPage() {
             )}
 
             {/* 图例。颜色必须取自当前调色板，否则切主题后图例和画面对不上。
-                「孤岛（濒临遗忘）」这一条已撤 —— 骨架换成课程结构之后不存在孤岛，
-                而它当初把唯一那张永久笔记判成了濒临遗忘 */}
+                ★ 从 7 条砍到 3 条 —— 一份要背 7 种颜色才能开始看的图不叫可视化。
+                课程/章/小节/疑问卡不再各占一色（类型由大小和位置表达），
+                颜色只留给要行动的三件事。「还没走到」那一条只在铺开时才有意义 */}
             <div className="absolute top-3 right-3 flex flex-col gap-1 text-[10px] text-[var(--text-subtle)] pointer-events-none">
               {[
-                [pal.nodeCourse, '课程'],
-                [pal.nodeChapter, '章'],
-                [pal.nodeSection, '小节'],
-                [pal.nodeNote, '笔记 / 己见'],
-                [pal.nodeDue, '待复习'],
-                [pal.node, '疑问卡'],
-                [pal.nodeUnlit, '还没走到'],
+                [pal.node, '学过的'],
+                [pal.nodeRewritten, '亲手写过（己见 / 笔记）'],
+                [pal.nodeDue, '该复习了'],
+                ...(showUnlit ? [[pal.nodeUnlit, '还没走到']] : []),
               ].map(([c, t]) => (
                 <span key={t} className="flex items-center gap-1.5 justify-end">
                   {t}
@@ -379,21 +399,37 @@ export default function BrainPage() {
               </div>
             )}
 
-            {/* 点亮的还少时给个预期，别让人觉得一片灰是坏了。
-                判据换成 lit 而不是节点总数 —— 开一门课就有几十个结构节点，
-                但那时候真正学过的可能还是零 */}
-            {!loadingNet && !!network?.neurons.length && (stats.lit ?? 0) < 12 && (
+            {/* 左下：走到哪了 + 还没走到的那些要不要铺开。
+                ★ 这两件事合成一块了。上一版是「已点亮 31 / 317」一句提示，
+                  外加两百个灰点自己在画面里喊 —— 现在灰点收成一个数字加一个开关，
+                  「开了课没走」照样被看见，但不再占着整块画布。 */}
+            {!loadingNet && !!network?.neurons.length && (
               <div
-                className={cn(
-                  FLOAT,
-                  'bottom-3 left-3 max-w-[264px] !rounded-[var(--radius)] pointer-events-none',
-                )}
+                className={cn(FLOAT, 'bottom-3 left-3 max-w-[280px] !rounded-[var(--radius)]')}
               >
-                <div className="text-[11.5px] text-[var(--text-muted)] leading-relaxed">
-                  已点亮 {stats.lit ?? 0} / {network.neurons.length}。
-                  <span className="text-[var(--text-subtle)]">
-                    淡的是还没走到的地方 —— 读完一节、收一张卡，对应的节点就亮起来。
-                  </span>
+                <div className="text-[11.5px] text-[var(--text-muted)] leading-relaxed tabular-nums">
+                  已点亮 <b className="text-[var(--text)]">{stats.lit ?? 0}</b>
+                  {unlitCount > 0 && (
+                    <>
+                      {' · '}
+                      <button
+                        onClick={() => setShowUnlit((s) => !s)}
+                        className="underline decoration-dotted underline-offset-2 hover:text-[var(--text)] transition-colors"
+                        title={
+                          showUnlit
+                            ? '收起来，只看真正走过的地方'
+                            : '把还没走到的小节也铺出来（它们是淡的，点进去就开始学）'
+                        }
+                      >
+                        还没走到 {unlitCount}
+                      </button>
+                    </>
+                  )}
+                  {(stats.lit ?? 0) < 12 && (
+                    <span className="block mt-0.5 text-[var(--text-subtle)]">
+                      读完一节、收一张卡，就会多亮一个点。
+                    </span>
+                  )}
                 </div>
               </div>
             )}
