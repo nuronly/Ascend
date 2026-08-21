@@ -730,35 +730,106 @@ async def _stream_round(
     raise LLMError(f"全部模型流式调用均失败（{scene}）：{last_err}")
 
 
-# 工具调用被当成正文吐出来时的特征标记。
-# ⚠️ 注意 DeepSeek 的分隔符用的是**全角竖线**（U+FF5C），不是 ASCII 的 |
-#    —— 按 ASCII 去匹配是匹配不到的，这一点卡过一次。
-_TOOL_LEAK_MARKS = (
-    "DSML",  # DeepSeek 的标记语言
-    "\uff5c\uff5c",  # <｜｜…｜｜> 这类特殊 token 的残留
-    "<\uff5ctool",  # <｜tool▁calls▁begin｜> 家族
-    "<tool_call",  # Qwen / ChatML 风格
-    "<function=",  # Llama 风格
-    "tool_calls>",
-)
+# 工具调用被当成正文吐出来时的特征标记，分强弱两档。
+#
+# 强特征：**尖括号紧跟全角竖线**。DeepSeek 的特殊 token 全长这样
+#   （<｜｜DSML｜｜tool_calls>、<｜tool▁calls▁begin｜>），而正常中文正文里
+#   几乎不可能出现这个组合 —— 所以它出现在**任何位置**都判定为泄漏。
+#   ⚠️ 全角竖线是 U+FF5C，不是 ASCII 的 |。按 ASCII 匹配是匹配不到的，卡过一次。
+_LEAK_HARD = ("<\uff5c",)
+
+# 弱特征：其它几家的格式。这些**可能被正文正常讨论到** ——
+#   讲 function calling 的课，正文里就会出现 <tool_call> 当例子。
+#   所以只在开头拦，中间出现就放过。
+_LEAK_SOFT = ("<tool_call", "<function=", "DSML", "tool_calls>")
 
 
 def _tool_leak(head: str) -> str:
     """检出「模型把工具调用写成了正文」。返回命中的标记，没有则空串。
 
-    ★ 只告警，不拦截 —— 这是刻意的取舍：
-
-      拦截需要先缓冲首段才能判断（流式下第一个 chunk 可能只有一个 `<`），
-      而且判错就会吞掉正常回答；更麻烦的是丢弃之后这一轮变成零产出，
-      得再补一条降级路径。而根治手段（tool_choice=none + 关思考）实测
-      已经把它压到 0/15。所以这里的职责是**让它再次发生时能被发现** ——
-      在此之前线上完全没有任何日志，只能靠用户截图。
-      如果告警真的出现了，再把它升级成拦截。
+    强特征任何位置都算，弱特征只认开头 —— 见上面那两组常量的理由。
     """
-    h = head.lstrip()[:80]
-    if not h.startswith("<"):
+    for m in _LEAK_HARD:
+        if m in head:
+            return m
+    if head.lstrip().startswith("<"):
+        window = head[:120]
+        return next((m for m in _LEAK_SOFT if m in window), "")
+    return ""
+
+
+class _LeakGate:
+    """流式正文的泄漏闸门：一出现工具标记，就把它和它后面的全部掐掉。
+
+    ★ 为什么必须是**流式**闸门，而不是「攒完一整轮再检查」
+
+      原来的做法是攒开头 80 字符、事后 log 一条告警。它漏掉了线上真实发生的
+      那一次：模型**先输出了一个列表序号，再吐标记**，于是「开头必须是 `<`」
+      这个判据完全不成立，一条日志都没记下来。
+      而正文是边生成边推给用户看的，没法等攒完再判断 —— 只能一边放行一边守。
+
+    ★ 为什么留一个尾部窗口不放行
+
+      标记是逐 token 来的：`<`、`｜`、`｜DSML` 各自一片（和流式 tool_calls
+      的分片累积是同一个道理）。不留窗口的话，标记正好跨在 chunk 边界上就
+      检不出来 —— 而这种漏检是概率性的，最难查。
+      代价是正文尾部有 24 字符的延迟，肉眼无感。
+
+    ★ 为什么是掐断而不是整段丢弃
+
+      标记之前的内容是模型正经说的话，没有理由丢；标记之后全是工具调用的
+      草稿，对用户毫无意义。掐断能保住前半段，也不会让这一轮变成零产出
+      （零产出会触发降级重试，白花一次调用）。
+    """
+
+    _GUARD = 24
+
+    __slots__ = ("_buf", "_emitted", "tripped", "hit")
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._emitted = 0
+        self.tripped = False
+        self.hit = ""
+
+    def _find(self) -> int:
+        """泄漏起点在 _buf 里的下标，没有则 -1。"""
+        best = -1
+        for m in _LEAK_HARD:
+            i = self._buf.find(m)
+            if i >= 0 and (best < 0 or i < best):
+                best, self.hit = i, m
+        # 弱特征只在「这一轮还什么都没放行过」且开头就是尖括号时才算
+        if self._emitted == 0 and self._buf.lstrip().startswith("<"):
+            for m in _LEAK_SOFT:
+                i = self._buf.find(m)
+                if 0 <= i < 120 and (best < 0 or i < best):
+                    best, self.hit = i, m
+        return best
+
+    def feed(self, delta: str) -> str:
+        """吃一片正文，返回可以安全放行的部分。"""
+        if self.tripped:
+            return ""  # 已经掐了，后面的全不要
+        self._buf += delta
+        if (i := self._find()) >= 0:
+            self.tripped = True
+            out, self._buf = self._buf[:i], ""
+            self._emitted += len(out)
+            return out
+        if len(self._buf) > self._GUARD:
+            out, self._buf = self._buf[: -self._GUARD], self._buf[-self._GUARD :]
+            self._emitted += len(out)
+            return out
         return ""
-    return next((m for m in _TOOL_LEAK_MARKS if m in h), "")
+
+    def flush(self) -> str:
+        """把尾部窗口里剩的放出来。轮末必须调，否则最后 24 字会被吃掉。"""
+        if self.tripped:
+            return ""
+        out, self._buf = self._buf, ""
+        self._emitted += len(out)
+        return out
 
 
 async def stream_chat(
@@ -809,7 +880,8 @@ async def stream_chat(
     for round_no in range(rounds + 1):
         last_round = round_no == rounds
         sink: dict[str, list[ToolCall]] = {}
-        head = ""  # 本轮正文的开头，用于事后检出工具标记泄漏
+        # 每轮一个闸门：把「工具调用被写成正文」的那一段掐在到用户之前
+        gate = _LeakGate()
 
         async for chunk in _stream_round(
             convo,
@@ -833,15 +905,28 @@ async def stream_chat(
             tool_choice="none" if last_round else "auto",
             thinking=thinking,
         ):
-            if chunk.delta and len(head) < 80:
-                head += chunk.delta
+            # 正文过闸门；思维链与工具事件原样透传
+            if chunk.delta:
+                if safe := gate.feed(chunk.delta):
+                    yield StreamChunk(
+                        delta=safe, model=chunk.model, provider=chunk.provider
+                    )
+                continue
+            if chunk.done:
+                # done 之前把尾部窗口吐干净，否则最后 24 个字会被吃掉
+                if tail := gate.flush():
+                    yield StreamChunk(
+                        delta=tail, model=chunk.model, provider=chunk.provider
+                    )
             yield chunk
 
-        if leak := _tool_leak(head):
+        if tail := gate.flush():  # 这一轮没走到 done（要去调工具）也得收尾
+            yield StreamChunk(delta=tail)
+
+        if gate.tripped:
             log.error(
-                "[%s] 工具调用泄漏进正文（命中 %r，round=%s/%s，tool_choice=%s）：%r",
-                scene, leak, round_no, rounds,
-                "none" if last_round else "auto", head[:120],
+                "[%s] 工具调用泄漏进正文，已掐断（命中 %r，round=%s/%s，tool_choice=%s）",
+                scene, gate.hit, round_no, rounds, "none" if last_round else "auto",
             )
 
         calls = sink.get("calls") or []

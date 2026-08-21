@@ -298,7 +298,7 @@ class Test最后一轮的收敛:
         assert payloads[0]["tools"], "禁用不等于摘掉"
 
 
-# ── 4. 泄漏探测 ────────────────────────────────────────────────
+# ── 4. 泄漏探测与拦截 ──────────────────────────────────────────
 class Test工具标记泄漏探测:
     def test_认出_DeepSeek_的全角竖线(self):
         """⚠️ DSML 用的是全角竖线 U+FF5C，按 ASCII 的 | 去匹配是匹配不到的。"""
@@ -324,11 +324,76 @@ class Test工具标记泄漏探测:
         ):
             assert not router._tool_leak(head), head
 
-    def test_只看开头_不扫全文(self):
-        """答案正文里提到 `<tool_call>` 这个词不该被当成泄漏 ——
-        泄漏的特征是**整段从标记开始**。"""
-        head = "顺便说一下，模型有时会输出 <tool_call> 这种东西，那是协议层的标记。"
-        assert not router._tool_leak(head)
+    def test_弱特征只认开头(self):
+        """讲 function calling 的课，正文里就会拿 <tool_call> 当例子 ——
+        中间出现不算泄漏，否则会把正常讲解掐掉。"""
+        assert not router._tool_leak("模型有时会输出 <tool_call> 这种东西，那是协议标记。")
+
+    def test_强特征任何位置都算(self):
+        """★ 线上真实漏检的那一次：模型**先输出了一个列表序号**再吐标记，
+        于是「开头必须是尖括号」这个判据完全不成立，一条日志都没记下来。"""
+        body = "1\n解释注意力机制为何被引入以解决长程依赖问题\n<｜｜DSML｜｜tool_calls>"
+        assert router._tool_leak(body) == "<\uff5c"
+
+
+class Test泄漏闸门:
+    """流式拦截。要点是必须在**推给用户之前**掐掉 —— 事后告警来不及。"""
+
+    def test_正常内容原样放行_一个字不丢(self):
+        gate = router._LeakGate()
+        src = "你记的是缩放点积注意力，除以根号 d_k 是为了防止内积过大让 softmax 饱和。"
+        out = "".join(gate.feed(c) for c in src) + gate.flush()
+        assert out == src
+        assert not gate.tripped
+
+    def test_flush_必须调_否则吃掉尾部(self):
+        """尾部留了窗口防标记跨片，不 flush 就真的丢了。"""
+        gate = router._LeakGate()
+        src = "短短一句话"
+        assert gate.feed(src) == ""  # 还在窗口里，一个字都没放行
+        assert gate.flush() == src
+
+    def test_掐断标记及其后面_保住前半段(self):
+        gate = router._LeakGate()
+        good = "你关于注意力学过这些：\n1. 缩放点积注意力。\n"
+        bad = '<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="read_note">'
+        out = gate.feed(good + bad) + gate.flush()
+        assert out == good, "标记之前的内容是模型正经说的话，不该丢"
+        assert gate.tripped
+        assert gate.hit == "<\uff5c"
+
+    def test_标记跨_chunk_分片也要检出(self):
+        """★ 标记是逐 token 来的：`<`、`｜`、`｜DSML` 各自一片
+        （和流式 tool_calls 的分片累积同一个道理）。
+        不留尾部窗口的话跨边界就漏检 —— 这种漏检是概率性的，最难查。"""
+        gate = router._LeakGate()
+        pieces = ["答案正文。", "<", "\uff5c", "\uff5cDSML", "\uff5c\uff5ctool_calls>"]
+        out = "".join(gate.feed(p) for p in pieces) + gate.flush()
+        assert gate.tripped
+        assert out == "答案正文。"
+
+    def test_掐断之后不再放行任何内容(self):
+        gate = router._LeakGate()
+        gate.feed("正文<\uff5c\uff5cDSML\uff5c\uff5ctool_calls>")
+        assert gate.feed("后面还有一堆草稿") == ""
+        assert gate.flush() == ""
+
+    def test_长正文不会卡在窗口里(self):
+        """窗口只留尾部，前面的必须持续往外流 —— 否则就不是流式了。"""
+        gate = router._LeakGate()
+        got = "".join(gate.feed("一" * 30) for _ in range(4))
+        assert len(got) >= 90, "正文应当边生成边放行，只滞后一个窗口"
+        assert (got + gate.flush()) == "一" * 120
+
+    def test_弱特征在开头才掐(self):
+        gate = router._LeakGate()
+        src = "讲一下 <tool_call> 这个标记的作用。"
+        assert (gate.feed(src) + gate.flush()) == src
+        assert not gate.tripped
+
+        gate2 = router._LeakGate()
+        gate2.feed('<tool_call>{"name":"t"}')
+        assert gate2.tripped
 
 
 def _独立运行() -> int:
@@ -341,6 +406,7 @@ def _独立运行() -> int:
         Test降级跨供应商,
         Test最后一轮的收敛,
         Test工具标记泄漏探测,
+        Test泄漏闸门,
     ):
         print(f"\n{cls.__name__}")
         inst = cls()
