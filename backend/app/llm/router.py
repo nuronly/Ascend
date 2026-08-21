@@ -784,11 +784,14 @@ class _LeakGate:
 
     _GUARD = 24
 
-    __slots__ = ("_buf", "_emitted", "tripped", "hit")
+    __slots__ = ("_buf", "emitted", "dropped", "tripped", "hit")
 
     def __init__(self) -> None:
         self._buf = ""
-        self._emitted = 0
+        #: 已经放行给用户的字数。0 说明这一轮用户什么都没看到 —— 关键的补救判据
+        self.emitted = 0
+        #: 被掐掉的内容。留着是为了日志能说清「掐了多少」，不是为了回放
+        self.dropped = ""
         self.tripped = False
         self.hit = ""
 
@@ -800,7 +803,7 @@ class _LeakGate:
             if i >= 0 and (best < 0 or i < best):
                 best, self.hit = i, m
         # 弱特征只在「这一轮还什么都没放行过」且开头就是尖括号时才算
-        if self._emitted == 0 and self._buf.lstrip().startswith("<"):
+        if self.emitted == 0 and self._buf.lstrip().startswith("<"):
             for m in _LEAK_SOFT:
                 i = self._buf.find(m)
                 if 0 <= i < 120 and (best < 0 or i < best):
@@ -810,16 +813,17 @@ class _LeakGate:
     def feed(self, delta: str) -> str:
         """吃一片正文，返回可以安全放行的部分。"""
         if self.tripped:
-            return ""  # 已经掐了，后面的全不要
+            self.dropped += delta  # 已经掐了，后面的只记账不放行
+            return ""
         self._buf += delta
         if (i := self._find()) >= 0:
             self.tripped = True
-            out, self._buf = self._buf[:i], ""
-            self._emitted += len(out)
+            out, self.dropped, self._buf = self._buf[:i], self._buf[i:], ""
+            self.emitted += len(out)
             return out
         if len(self._buf) > self._GUARD:
             out, self._buf = self._buf[: -self._GUARD], self._buf[-self._GUARD :]
-            self._emitted += len(out)
+            self.emitted += len(out)
             return out
         return ""
 
@@ -828,8 +832,18 @@ class _LeakGate:
         if self.tripped:
             return ""
         out, self._buf = self._buf, ""
-        self._emitted += len(out)
+        self.emitted += len(out)
         return out
+
+
+# 闸门把整段正文掐光之后，用来逼模型收敛的一句话。
+# 措辞上刻意点明「你刚才没有产出回答」—— 模型需要知道上一轮失败了，
+# 否则它会以为自己已经说过、这一轮接着往下讲。
+_FORCE_ANSWER = (
+    "你刚才那一轮没有产出任何回答（工具已经停用了）。"
+    "现在请**不要再调用任何工具**，就用前面已经查到的内容，"
+    "直接用自然语言回答我最初的问题。"
+)
 
 
 async def stream_chat(
@@ -925,11 +939,60 @@ async def stream_chat(
 
         if gate.tripped:
             log.error(
-                "[%s] 工具调用泄漏进正文，已掐断（命中 %r，round=%s/%s，tool_choice=%s）",
+                "[%s] 工具调用泄漏进正文，已掐断（命中 %r，round=%s/%s，tool_choice=%s，"
+                "放行 %s 字 / 掐掉 %s 字）",
                 scene, gate.hit, round_no, rounds, "none" if last_round else "auto",
+                gate.emitted, len(gate.dropped),
             )
 
         calls = sink.get("calls") or []
+
+        # ★ 泄漏从第一个字就开始 → 掐完什么都不剩，用户得到一片空白。
+        #
+        #   这个边界我原先只在注释里写了「掐断能保住前半段」就放过去了，
+        #   而线上第一次就撞上：最后一轮（tool_choice=none）模型仍然想读 5 份
+        #   笔记，于是整整 195 字全是 DSML —— 前半段是空的。
+        #   事件流的样子是 43 个 thinking、10 个 tool_call、1 个 done、**0 个 delta**。
+        #
+        #   空白比乱码更糟：乱码至少能看出是模型的毛病，空白只会让人以为
+        #   产品坏了。所以这里必须补救 —— 明确告诉它上一轮没产出、别再调工具，
+        #   再给一轮，并且这一轮**连工具定义都不给**（连"存在"都不告诉它，
+        #   比 tool_choice=none 更硬）。
+        if gate.tripped and not gate.emitted and not calls:
+            log.warning("[%s] 泄漏把整段正文吃光了，追加一轮强制收敛", scene)
+            convo.append(Message(role="user", content=_FORCE_ANSWER))
+            rescue = _LeakGate()
+            async for chunk in _stream_round(
+                convo,
+                {},
+                scene=f"{scene}:rescue",
+                tier=tier,
+                user_id=user_id,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                json_mode=json_mode,
+                specs=None,
+                thinking=thinking,
+            ):
+                if chunk.delta:
+                    if safe := rescue.feed(chunk.delta):
+                        yield StreamChunk(
+                            delta=safe, model=chunk.model, provider=chunk.provider
+                        )
+                    continue
+                if chunk.done:
+                    if tail := rescue.flush():
+                        yield StreamChunk(
+                            delta=tail, model=chunk.model, provider=chunk.provider
+                        )
+                yield chunk
+            if tail := rescue.flush():
+                yield StreamChunk(delta=tail)
+            if not rescue.emitted:
+                # 连补救轮都收不住 —— 宁可明确报错，也不能让用户对着空白猜
+                raise LLMError(f"模型反复把工具调用当正文输出，无法收敛（{scene}）")
+            return
+
         if not calls or not tools:
             return  # 本轮就是最终输出，done 已经由 _stream_round 发出
 

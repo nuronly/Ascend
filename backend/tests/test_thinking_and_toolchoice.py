@@ -37,7 +37,7 @@ if str(_BACKEND) not in sys.path:
 import httpx  # noqa: E402
 
 from app.llm import router  # noqa: E402
-from app.llm.base import Message, StreamChunk, ToolCall, ToolEvent  # noqa: E402
+from app.llm.base import LLMError, Message, StreamChunk, ToolCall, ToolEvent  # noqa: E402
 from app.llm.openai_compat import OpenAICompatProvider  # noqa: E402
 from app.llm.tools import ToolResult  # noqa: E402
 
@@ -413,8 +413,10 @@ class Test闸门的接线:
 
     def _run(self, script: list[list[StreamChunk]], with_tools: bool) -> str:
         it = iter(script)
+        self.trips = 0  # 模型往返次数，用来确认「没白多跑一轮」
 
         async def fake_round(convo, sink, **kw):
+            self.trips += 1
             try:
                 chunks = next(it)
             except StopIteration:
@@ -502,6 +504,102 @@ class Test闸门的接线:
         shape = "1\n解释注意力机制为何被引入以解决长程依赖问题\n"
         got = self._run([[StreamChunk(delta=shape + _BAD), StreamChunk(done=True)]], False)
         assert got == shape
+        assert self.trips == 1, "还有正文放行过，就不该白花一轮去补救"
+
+
+class Test泄漏把正文吃光时的补救:
+    """★ 空白比乱码更糟。
+
+    线上撞到的形状：最后一轮（tool_choice=none）模型仍然想读 5 份笔记，
+    于是整整 195 字**全是** DSML —— 掐完一个字都不剩。事件流长这样：
+    43 个 thinking、10 个 tool_call、1 个 done、**0 个 delta**。
+    用户看到引用卡片下面一片空白，只会以为产品坏了。
+
+    「掐断能保住前半段」这句话在前半段为空时不成立 —— 我原先只在注释里
+    写了它就把这个边界放过去了。
+    """
+
+    def _run(self, script: list[list[StreamChunk]]) -> tuple[str, int]:
+        it = iter(script)
+        trips = {"n": 0}
+        seen_specs: list[bool] = []
+
+        async def fake_round(convo, sink, **kw):
+            trips["n"] += 1
+            seen_specs.append(bool(kw.get("specs")))
+            try:
+                chunks = next(it)
+            except StopIteration:
+                yield StreamChunk(done=True)
+                return
+            for c in chunks:
+                if c.tool_calls:
+                    sink["calls"] = c.tool_calls
+                    return
+                yield c
+
+        async def noop(*_a, **_kw):
+            return None
+
+        real = (router._stream_round, router.check_budget)
+        router._stream_round = fake_round  # type: ignore[assignment]
+        router.check_budget = noop  # type: ignore[assignment]
+
+        async def go() -> str:
+            out = ""
+            async for ch in router.stream_chat(
+                [Message(role="user", content="hi")], scene="verify", tools=[_T()],
+                max_rounds=1,
+            ):
+                out += ch.delta
+            return out
+
+        try:
+            got = asyncio.run(go())
+        finally:
+            router._stream_round, router.check_budget = real  # type: ignore[assignment]
+        self.specs = seen_specs
+        return got, trips["n"]
+
+    def test_掐光之后追加一轮_用户拿到回答(self):
+        got, trips = self._run([
+            [StreamChunk(delta=_BAD), StreamChunk(done=True)],          # 整段泄漏
+            [StreamChunk(delta="你有 5 份笔记。"), StreamChunk(done=True)],  # 补救轮
+        ])
+        assert got == "你有 5 份笔记。"
+        assert trips == 2
+
+    def test_补救轮连工具定义都不给(self):
+        """比 tool_choice=none 更硬一档：连「工具存在」都不告诉它。
+        none 只是「请别用」，而它刚刚已经证明自己不听。"""
+        self._run([
+            [StreamChunk(delta=_BAD), StreamChunk(done=True)],
+            [StreamChunk(delta="回答。"), StreamChunk(done=True)],
+        ])
+        assert self.specs == [True, False]
+
+    def test_补救轮也收不住就报错_不给空白(self):
+        """用户看到「出错了」至少知道发生了什么；看到空白只会以为产品坏了。"""
+        try:
+            self._run([
+                [StreamChunk(delta=_BAD), StreamChunk(done=True)],
+                [StreamChunk(delta=_BAD), StreamChunk(done=True)],
+            ])
+        except LLMError as exc:
+            assert "无法收敛" in str(exc)
+        else:
+            raise AssertionError("补救轮也空的时候必须报错，不能静默返回空回答")
+
+    def test_还想调工具时走原来的忽略路径_不触发补救(self):
+        """最后一轮发的是**原生** tool_calls（不是文本泄漏）—— 那条路已经有
+        「忽略并收尾」的处理，不该被补救逻辑抢走。"""
+        got, trips = self._run([
+            [StreamChunk(delta="先说一句。"),
+             StreamChunk(tool_calls=[ToolCall(id="c1", name="t", arguments="{}")])],
+            [StreamChunk(tool_calls=[ToolCall(id="c2", name="t", arguments="{}")])],
+        ])
+        assert got == "先说一句。"
+        assert trips == 2, "两轮跑完就该收尾，不追加补救轮"
 
 
 def _独立运行() -> int:
@@ -516,6 +614,7 @@ def _独立运行() -> int:
         Test工具标记泄漏探测,
         Test泄漏闸门,
         Test闸门的接线,
+        Test泄漏把正文吃光时的补救,
     ):
         print(f"\n{cls.__name__}")
         inst = cls()
