@@ -396,6 +396,114 @@ class Test泄漏闸门:
         assert gate2.tripped
 
 
+# ── 5. 闸门在 stream_chat 里的接线 ─────────────────────────────
+_GOOD = "你关于注意力学过这些：缩放点积注意力，除以根号 d_k 防止 softmax 饱和。"
+_BAD = '<\uff5c\uff5cDSML\uff5c\uff5ctool_calls><\uff5c\uff5cDSML\uff5c\uff5cinvoke name="read_note">'
+
+
+class Test闸门的接线:
+    """闸门本身对了，接线仍可能错 —— 而且错法是**静默少字**。
+
+    两条收尾路径必须都覆盖：
+      A 正常收尾会发 done → 尾部窗口靠 done 之前那次 flush
+      B 去调工具的那一轮 _stream_round 直接 return，**不发 done**
+        → 尾部只能靠轮末那次 flush。漏了的话每轮末尾静默少 24 个字，
+          而且只在带工具的场景出现，肉眼几乎发现不了
+    """
+
+    def _run(self, script: list[list[StreamChunk]], with_tools: bool) -> str:
+        it = iter(script)
+
+        async def fake_round(convo, sink, **kw):
+            try:
+                chunks = next(it)
+            except StopIteration:
+                yield StreamChunk(done=True)
+                return
+            for c in chunks:
+                if c.tool_calls:
+                    sink["calls"] = c.tool_calls
+                    return  # ★ 照做真身：去调工具的那一轮不发 done
+                yield c
+
+        async def fake_run_tool(call, _tools, **_kw):
+            return "工具结果", ToolEvent(phase="result", name=call.name, detail="ok")
+
+        async def noop(*_a, **_kw):
+            return None
+
+        real = (router._stream_round, router._run_tool, router.check_budget)
+        router._stream_round = fake_round  # type: ignore[assignment]
+        router._run_tool = fake_run_tool  # type: ignore[assignment]
+        router.check_budget = noop  # type: ignore[assignment]
+
+        async def go() -> str:
+            out = ""
+            async for ch in router.stream_chat(
+                [Message(role="user", content="hi")],
+                scene="verify",
+                tools=[_T()] if with_tools else None,
+                max_rounds=1,
+            ):
+                out += ch.delta
+            return out
+
+        try:
+            return asyncio.run(go())
+        finally:
+            router._stream_round, router._run_tool, router.check_budget = real  # type: ignore[assignment]
+
+    def test_A_正常收尾一个字不丢(self):
+        got = self._run([[StreamChunk(delta=_GOOD), StreamChunk(done=True)]], False)
+        assert got == _GOOD
+
+    def test_A_逐字流式一个字不丢(self):
+        got = self._run(
+            [[*(StreamChunk(delta=c) for c in _GOOD), StreamChunk(done=True)]], False
+        )
+        assert got == _GOOD
+
+    def test_B_调工具那一轮的尾部不能被吃掉(self):
+        """★ 这一轮不发 done，尾部只能靠轮末 flush。回归了就每轮少 24 个字。"""
+        got = self._run(
+            [
+                [
+                    StreamChunk(delta="先想一下。"),
+                    StreamChunk(tool_calls=[ToolCall(id="c1", name="t", arguments="{}")]),
+                ],
+                [StreamChunk(delta=_GOOD), StreamChunk(done=True)],
+            ],
+            True,
+        )
+        assert got == "先想一下。" + _GOOD
+
+    def test_掐断泄漏保住前半段(self):
+        got = self._run(
+            [[StreamChunk(delta=_GOOD), StreamChunk(delta=_BAD), StreamChunk(done=True)]],
+            False,
+        )
+        assert got == _GOOD
+
+    def test_标记跨_chunk_分片也掐得住(self):
+        got = self._run(
+            [[
+                StreamChunk(delta=_GOOD),
+                *(StreamChunk(delta=p)
+                  for p in ("<", "\uff5c", "\uff5cDSML", "\uff5c\uff5ctool_calls>")),
+                StreamChunk(done=True),
+            ]],
+            False,
+        )
+        assert got == _GOOD
+
+    def test_线上那个形状_正文中间开始泄漏(self):
+        """模型先输出一个列表序号再吐标记 —— 老判据（开头必须是尖括号）
+        对这个形状完全失效，既没拦住也没告警。"""
+        shape = "1\n解释注意力机制为何被引入以解决长程依赖问题\n"
+        got = self._run([[StreamChunk(delta=shape + _BAD), StreamChunk(done=True)]], False)
+        assert got == shape
+
+
 def _独立运行() -> int:
     import inspect
     import traceback
@@ -407,6 +515,7 @@ def _独立运行() -> int:
         Test最后一轮的收敛,
         Test工具标记泄漏探测,
         Test泄漏闸门,
+        Test闸门的接线,
     ):
         print(f"\n{cls.__name__}")
         inst = cls()
