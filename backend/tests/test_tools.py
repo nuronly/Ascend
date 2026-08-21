@@ -228,7 +228,13 @@ class Test轮次上限:
 
         async def fake_round(convo, sink, **kw):
             trips["n"] += 1
-            if kw.get("specs"):  # 还带着工具 → 假装它又要调一次
+            # ★ 替身必须照做真身的判据：最后一轮的标志是 tool_choice="none"，
+            #   不是「没有 specs」。真身现在**恒传 specs** —— 最后一轮改成了
+            #   「工具还在但这轮禁用」，因为「干脆不给工具」会让还想调工具的
+            #   模型把调用当正文吐出来（DSML 标记泄漏）。
+            #   要是这里还按 specs 判断，替身就永远认为「还带着工具」，
+            #   测出来的轮次语义与线上不符。
+            if kw.get("specs") and kw.get("tool_choice") != "none":
                 sink["calls"] = [ToolCall(id=f"c{trips['n']}", name="t", arguments="{}")]
                 return
             yield StreamChunk(done=True)

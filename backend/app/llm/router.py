@@ -499,6 +499,7 @@ async def chat(
     use_cache: bool = False,
     model_override: str | None = None,
     quota: int | None = None,
+    thinking: bool = True,
 ) -> LLMResult:
     chain = _chain(tier, model_override, scene)
     # 局部名刻意不叫 cache_key —— 那是导入进来的函数名
@@ -531,6 +532,8 @@ async def chat(
                     temperature=temperature,
                     max_tokens=max_tokens,
                     json_mode=json_mode,
+                    # 关思考的参数名逐跳重新取 —— 降级会跨供应商，参数名跟着变
+                    extra_body=None if thinking else provider.no_thinking_body(),
                 )
                 await _log_call(
                     user_id=user_id, scene=scene, provider=provider.name, model=result.model,
@@ -580,6 +583,7 @@ async def chat_json(
     use_cache: bool = False,
     retries: int = 2,
     quota: int | None = None,
+    thinking: bool = True,
 ) -> Any:
     """要求结构化输出，并保证返回可用的 Python 对象。
 
@@ -591,7 +595,7 @@ async def chat_json(
         result = await chat(
             msgs, scene=scene, tier=tier, user_id=user_id, temperature=temperature,
             max_tokens=max_tokens, json_mode=True,
-            use_cache=use_cache and i == 0, quota=quota,
+            use_cache=use_cache and i == 0, quota=quota, thinking=thinking,
         )
         last_text = result.text
         try:
@@ -622,6 +626,8 @@ async def _stream_round(
     max_tokens: int | None,
     json_mode: bool,
     specs: list[dict[str, Any]] | None,
+    tool_choice: str = "auto",
+    thinking: bool = True,
 ) -> AsyncIterator[StreamChunk]:
     """一轮流式调用（含降级链）。
 
@@ -654,6 +660,11 @@ async def _stream_round(
                 max_tokens=max_tokens,
                 json_mode=json_mode,
                 tools=specs,
+                tool_choice=tool_choice,
+                # ★ 关思考的字段名必须**逐跳重新取**：降级链会跨供应商
+                #   （deepseek → maas），而两家的参数名不一样，给错的那个
+                #   会被静默忽略且吃光 max_tokens。写死在调用方就会在降级后失效
+                extra_body=None if thinking else provider.no_thinking_body(),
             ):
                 if chunk.done:
                     usage = chunk.usage or usage
@@ -719,6 +730,37 @@ async def _stream_round(
     raise LLMError(f"全部模型流式调用均失败（{scene}）：{last_err}")
 
 
+# 工具调用被当成正文吐出来时的特征标记。
+# ⚠️ 注意 DeepSeek 的分隔符用的是**全角竖线**（U+FF5C），不是 ASCII 的 |
+#    —— 按 ASCII 去匹配是匹配不到的，这一点卡过一次。
+_TOOL_LEAK_MARKS = (
+    "DSML",  # DeepSeek 的标记语言
+    "\uff5c\uff5c",  # <｜｜…｜｜> 这类特殊 token 的残留
+    "<\uff5ctool",  # <｜tool▁calls▁begin｜> 家族
+    "<tool_call",  # Qwen / ChatML 风格
+    "<function=",  # Llama 风格
+    "tool_calls>",
+)
+
+
+def _tool_leak(head: str) -> str:
+    """检出「模型把工具调用写成了正文」。返回命中的标记，没有则空串。
+
+    ★ 只告警，不拦截 —— 这是刻意的取舍：
+
+      拦截需要先缓冲首段才能判断（流式下第一个 chunk 可能只有一个 `<`），
+      而且判错就会吞掉正常回答；更麻烦的是丢弃之后这一轮变成零产出，
+      得再补一条降级路径。而根治手段（tool_choice=none + 关思考）实测
+      已经把它压到 0/15。所以这里的职责是**让它再次发生时能被发现** ——
+      在此之前线上完全没有任何日志，只能靠用户截图。
+      如果告警真的出现了，再把它升级成拦截。
+    """
+    h = head.lstrip()[:80]
+    if not h.startswith("<"):
+        return ""
+    return next((m for m in _TOOL_LEAK_MARKS if m in h), "")
+
+
 async def stream_chat(
     messages: list[Message],
     *,
@@ -731,6 +773,7 @@ async def stream_chat(
     json_mode: bool = False,
     tools: list[Tool] | None = None,
     max_rounds: int | None = None,
+    thinking: bool = True,
 ) -> AsyncIterator[StreamChunk]:
     """流式输出。等 30 秒白屏必流失（PLAN §3.1）。
 
@@ -744,6 +787,17 @@ async def stream_chat(
       几十秒 + 一份完整历史的 token。全局上限（tool_max_rounds）是按大纲那种
       「值得多找几轮资料」的场景定的；正文与笔记要的是尽快开始讲，
       调用方可以在这里压低上界。
+
+      实测过一次失控：第二大脑没压这个上界，于是吃全局的 3 轮，模型一轮里
+      并行发四五个调用，一个问题打了 13 次工具、跑 4 次完整往返，首字 40 秒。
+
+    ★ thinking=False：这个场景不要思考链
+
+      调用方只表达意图，**不写参数名** —— 各家的开关名不一样，而降级链会
+      跨供应商，写死就会在降级后失效（甚至反过来吃光 max_tokens 让正文变空）。
+      翻译由 provider.no_thinking_body() 负责，逐跳重新取。
+      实测（同一 prompt 的首字）：deepseek-v4-pro 3420ms → 758ms，
+      qwen3.8-max 3855ms → 743ms。要快的场景关掉它是四五倍的差距。
     """
     await check_budget(user_id, quota)
     specs = tool_specs(tools) if tools else None
@@ -753,10 +807,9 @@ async def stream_chat(
         rounds = 0
 
     for round_no in range(rounds + 1):
-        # 最后一轮不再给工具：必须收敛到正文。留着工具的话，模型往往会
-        # 「再搜一次看看」，把额度耗在检索上却始终不产出大纲
         last_round = round_no == rounds
         sink: dict[str, list[ToolCall]] = {}
+        head = ""  # 本轮正文的开头，用于事后检出工具标记泄漏
 
         async for chunk in _stream_round(
             convo,
@@ -767,13 +820,46 @@ async def stream_chat(
             temperature=temperature,
             max_tokens=max_tokens,
             json_mode=json_mode,
-            specs=None if last_round else specs,
+            # ★ 最后一轮必须收敛到正文，但收敛的方式是「工具还在，这轮禁用」
+            #   （tool_choice=none），而不是「干脆不告诉它有工具」。
+            #
+            #   原来是 specs=None。问题在于：模型此时往往还想再查一次，而请求里
+            #   没有 tools，它就没有原生 tool_call 通道可用 —— 于是把工具调用
+            #   **当正文吐出来**。实测线上真的发生了：用户等 40 秒，等来的首字是
+            #   `<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name="search_memory">…`
+            #   （DeepSeek 的内部标记语言整段泄漏进答案）。
+            #   换成 tool_choice=none 之后实测 5/5 干净收敛成自然语言。
+            specs=specs,
+            tool_choice="none" if last_round else "auto",
+            thinking=thinking,
         ):
+            if chunk.delta and len(head) < 80:
+                head += chunk.delta
             yield chunk
+
+        if leak := _tool_leak(head):
+            log.error(
+                "[%s] 工具调用泄漏进正文（命中 %r，round=%s/%s，tool_choice=%s）：%r",
+                scene, leak, round_no, rounds,
+                "none" if last_round else "auto", head[:120],
+            )
 
         calls = sink.get("calls") or []
         if not calls or not tools:
             return  # 本轮就是最终输出，done 已经由 _stream_round 发出
+
+        # ★ 最后一轮即使模型还是发了 tool_calls，也绝不执行。
+        #   tool_choice="none" 是「请别用」而不是硬约束，模型可以不听（实测
+        #   5/5 都听了，但那是概率不是保证）。而这一轮之后没有下一轮去消费
+        #   结果 —— 执行了就是白花一次调用，还白等它的耗时。
+        #   注意这也是「最后一轮改成恒传 specs」带来的新边界：改之前
+        #   specs=None 时模型没有原生通道，走不到这里。
+        if last_round:
+            log.warning(
+                "[%s] 最后一轮仍发起了 %s 个工具调用（tool_choice=none 未被遵守），已忽略",
+                scene, len(calls),
+            )
+            return
 
         # 预算每轮重查：一轮 loop 就是一次完整的模型往返，
         # 只在入口查一次的话长 loop 会悄悄超支

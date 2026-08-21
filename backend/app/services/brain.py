@@ -248,6 +248,9 @@ async def rerank(
             temperature=0.1,
             max_tokens=1200,
             quota=quota,
+            # 打个相关性分数不需要思考链。实测这一步要 1.2 秒，
+            # 而它在用户的等待里是纯静默的一段
+            thinking=False,
         )
     except Exception:
         log.warning("重排失败，按融合分数截断", exc_info=True)
@@ -394,6 +397,18 @@ async def answer_stream(
             max_tokens=6000,  # 带工具的多轮往返，给足额度
             quota=quota,
             tools=tools,
+            # ★ 只给一轮工具。原来漏了这个参数，于是吃全局的 tool_max_rounds=3 ——
+            #   而那个 3 是按大纲那种「值得多找几轮资料」的场景定的。
+            #   实测后果：一个问题打 13 次工具、跑 4 次完整往返、首字 40 秒
+            #   （模型一轮里能并行发四五个调用，且这些调用是串行执行的）。
+            #   这里本来就不缺素材 —— 前面的四路召回 + 重排已经递了 5 条摘要，
+            #   工具的价值只在「把某份笔记读全」，一轮足够。
+            max_rounds=1,
+            # ★ 问答要的是快。实测关掉思考链：首字 3420ms → 758ms。
+            #   而且思考链正是 DSML 标记泄漏的土壤（报错原文就是
+            #   「reasoning_content in the thinking mode must be passed back」）。
+            #   正文与笔记生成不关 —— 那里思考链是产品特性（等待期看得见它在想）。
+            thinking=False,
         ):
             if chunk.done:
                 break
