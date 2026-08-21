@@ -35,7 +35,7 @@ import { cn, relativeTime } from '@/lib/utils'
  *   手不离键盘、不用点、不用等。动画只做四件小事（见 index.css 的 quiz-*）。
  */
 
-type Stage = 'pick' | 'making' | 'quiz' | 'done'
+type Stage = 'pick' | 'quiz' | 'done'
 
 /** 选对之后停留多久再自动进下一题。太快看不清对错，太慢打断节奏 */
 const AUTO_NEXT_MS = 620
@@ -45,6 +45,15 @@ export default function ReviewPage() {
   const nav = useNavigate()
   const [stage, setStage] = useState<Stage>('pick')
   const [quiz, setQuiz] = useState<QuizData | null>(null)
+  /**
+   * 正在给哪一章出题。
+   *
+   * ★ 刻意**不**用全屏遮罩把人挡住：出一套题要二三十秒，锁着界面等
+   *   本身就够难受了，而且离开就等于白等。
+   *   现在只在那张章节卡片上转个圈，其余交互照常；真要走开也没关系 ——
+   *   出好的题会落库，回来在卡片上就能看到「还没刷完，继续」。
+   */
+  const [making, setMaking] = useState<string | null>(null)
   const [idx, setIdx] = useState(0)
   const [reply, setReply] = useState('')
   const [grading, setGrading] = useState(false)
@@ -64,18 +73,60 @@ export default function ReviewPage() {
 
   useEffect(() => () => { if (timer.current) window.clearTimeout(timer.current) }, [])
 
+  /** 收总结。★ 必须把返回值写回 state —— 「从这里回去补」的链接是后端算的
+      （错题 → 溯源卡片 → 所在小节），不接回来那一整块就永远是空的 */
+  const settle = useCallback(
+    (id: string) => {
+      void api
+        .post<Record<string, unknown>>(`/review/quiz/${id}/finish`, {})
+        .then((s) => {
+          setQuiz((cur) => (cur && cur.id === id ? { ...cur, summary: s } : cur))
+          qc.invalidateQueries({ queryKey: ['review-chapters'] })
+          qc.invalidateQueries({ queryKey: ['review-stats'] })
+        })
+        .catch(() => {})
+    },
+    [qc],
+  )
+
+  /** 进入一套题。定位到第一道还没答的 —— 「继续刷」和「新出一套」共用这条路 */
+  const enter = (q: QuizData) => {
+    const first = nextUnanswered(q.items, -1)
+    setQuiz(q)
+    setReply('')
+    setShortFb(null)
+    setFx(null)
+    // 全答完但没看过总结（上次直接关了页面）—— 别让他再点一遍最后一题
+    if (first < 0 && q.items.some((i) => i.correct !== null && i.correct !== undefined)) {
+      setIdx(0)
+      setStage('done')
+      settle(q.id)
+      return
+    }
+    setIdx(first < 0 ? 0 : first)
+    setStage('quiz')
+  }
+
   const start = async (t: ChapterTarget) => {
-    setStage('making')
+    setMaking(t.chapter_id)
     try {
       const q = await api.post<QuizData>('/review/quiz', { chapter_id: t.chapter_id })
-      setQuiz(q)
-      setIdx(0)
-      setReply('')
-      setShortFb(null)
-      setStage('quiz')
+      // 出题期间用户可能已经走开或者点进了别的东西 —— 那就不抢他的界面，
+      // 题已经落库了，卡片上会出现「继续」
+      enter(q)
+      qc.invalidateQueries({ queryKey: ['review-chapters'] })
     } catch (e: any) {
       toast.error(e?.message ?? '出题失败')
-      setStage('pick')
+    } finally {
+      setMaking(null)
+    }
+  }
+
+  const resume = async (quizId: string) => {
+    try {
+      enter(await api.get<QuizData>(`/review/quiz/${quizId}`))
+    } catch (e: any) {
+      toast.error(e?.message ?? '打不开这套题')
     }
   }
 
@@ -96,19 +147,13 @@ export default function ReviewPage() {
       const to = nextUnanswered(q.items, idx)
       if (to < 0) {
         setStage('done')
-        void api
-          .post(`/review/quiz/${q.id}/finish`, {})
-          .then(() => {
-            qc.invalidateQueries({ queryKey: ['review-chapters'] })
-            qc.invalidateQueries({ queryKey: ['review-stats'] })
-          })
-          .catch(() => {})
+        settle(q.id)
       } else {
         setIdx(to)
       }
       return q
     })
-  }, [idx, qc])
+  }, [idx, settle])
 
   /** 选一个选项。本地判 → 立刻反馈 → 对了自动往下 */
   const pick = useCallback(
@@ -191,7 +236,7 @@ export default function ReviewPage() {
   }, [stage, item, idx, pick, goNext])
 
   /* ── 选章 ── */
-  if (stage === 'pick' || stage === 'making') {
+  if (stage === 'pick') {
     const chapters = data?.chapters ?? []
     return (
       <div className="max-w-[820px] w-full mx-auto px-8 py-10 pb-24">
@@ -200,6 +245,23 @@ export default function ReviewPage() {
           挑一章，我按你在这一章问过什么、写过什么、哪里说过没搞懂来出题 ——
           不是照着教材随便考你。
         </p>
+
+        {/* 出题要二三十秒。不挡着他，只说清「可以走开」 */}
+        {!!making && (
+          <div className="mt-5 flex items-start gap-2.5 px-3.5 py-3 rounded-[var(--radius)] border border-[var(--border)] bg-[var(--bg-sunken)] animate-fade-up">
+            <Spinner className="size-3.5 text-[var(--accent)] mt-[3px] shrink-0" />
+            <div className="text-[12.5px] leading-relaxed">
+              <div className="font-medium">正在出题…</div>
+              <div className="text-[var(--text-muted)] mt-0.5">
+                在翻你这一章问过的问题、写下的理解，和你说过还没搞懂的地方。
+                <span className="text-[var(--text-subtle)]">
+                  {' '}
+                  可以先去干别的 —— 出好的题会留在这一章上等你。
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {isLoading ? (
           <div className="mt-8 space-y-3">
@@ -219,51 +281,65 @@ export default function ReviewPage() {
           />
         ) : (
           <div className="mt-7 space-y-2.5">
-            {chapters.map((t) => (
-              <button
-                key={t.chapter_id}
-                onClick={() => start(t)}
-                disabled={stage === 'making'}
-                className={cn(
-                  'w-full text-left px-4 py-3.5 rounded-[var(--radius-lg)] border transition-colors',
-                  'border-[var(--border)] hover:border-[var(--border-strong)] hover:bg-[var(--bg-hover)]',
-                  'disabled:opacity-50 disabled:cursor-wait',
-                )}
-              >
-                <div className="flex items-center gap-2.5">
-                  <span className="text-[14px] font-medium truncate">{t.chapter_title}</span>
-                  {/* ★ FSRS 退到后台之后的新位置：它回答「今天该刷哪一章」 */}
-                  {t.due > 0 && (
-                    <span className="shrink-0 px-1.5 py-[1px] rounded-full text-[10.5px] tabular-nums bg-[color-mix(in_oklch,var(--sem-due)_14%,transparent)] text-[var(--sem-due)]">
-                      {t.due} 张待复习
-                    </span>
+            {chapters.map((t) => {
+              const busy = making === t.chapter_id
+              return (
+                <div
+                  key={t.chapter_id}
+                  className={cn(
+                    'px-4 py-3.5 rounded-[var(--radius-lg)] border transition-colors',
+                    'border-[var(--border)]',
+                    !making && 'hover:border-[var(--border-strong)]',
+                    busy && 'border-[var(--border-strong)] bg-[var(--bg-sunken)]',
                   )}
+                >
+                  <div className="flex items-center gap-2.5">
+                    <span className="text-[14px] font-medium truncate">{t.chapter_title}</span>
+                    {/* ★ FSRS 退到后台之后的新位置：它回答「今天该刷哪一章」 */}
+                    {t.due > 0 && (
+                      <span className="shrink-0 px-1.5 py-[1px] rounded-full text-[10.5px] tabular-nums bg-[color-mix(in_oklch,var(--sem-due)_14%,transparent)] text-[var(--sem-due)]">
+                        {t.due} 张待复习
+                      </span>
+                    )}
+                    <div className="grow" />
+                    {busy ? (
+                      <span className="flex items-center gap-1.5 text-[11.5px] text-[var(--text-muted)] shrink-0">
+                        <Spinner className="size-3 text-[var(--accent)]" />
+                        出题中
+                      </span>
+                    ) : (
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {/* 没刷完的那套排在前面：继续刷不花钱，重新出要几十秒 */}
+                        {t.pending && (
+                          <Button size="xs" variant="primary" onClick={() => resume(t.pending!.id)}>
+                            继续 {t.pending.answered}/{t.pending.total}
+                          </Button>
+                        )}
+                        <Button
+                          size="xs"
+                          variant={t.pending ? 'ghost' : 'outline'}
+                          onClick={() => start(t)}
+                          disabled={!!making}
+                        >
+                          {t.pending ? '重新出' : '出题'}
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="text-[12px] text-[var(--text-muted)] mt-1 truncate">
+                    {t.course_title}
+                    {t.summary ? ` · ${t.summary}` : ''}
+                  </div>
+                  <div className="flex items-center gap-3 mt-1.5 text-[11px] text-[var(--text-subtle)] tabular-nums">
+                    <span>
+                      已读 {t.read}/{t.sections} 节
+                    </span>
+                    <span>{t.cards} 张卡</span>
+                    {t.last_quiz_at && <span>上次刷于 {relativeTime(t.last_quiz_at)}</span>}
+                  </div>
                 </div>
-                <div className="text-[12px] text-[var(--text-muted)] mt-1 truncate">
-                  {t.course_title}
-                  {t.summary ? ` · ${t.summary}` : ''}
-                </div>
-                <div className="flex items-center gap-3 mt-1.5 text-[11px] text-[var(--text-subtle)] tabular-nums">
-                  <span>
-                    已读 {t.read}/{t.sections} 节
-                  </span>
-                  <span>{t.cards} 张卡</span>
-                  {t.last_quiz_at && <span>上次刷于 {relativeTime(t.last_quiz_at)}</span>}
-                </div>
-              </button>
-            ))}
-          </div>
-        )}
-
-        {stage === 'making' && (
-          <div className="fixed inset-0 z-30 flex items-center justify-center bg-[color-mix(in_oklch,var(--bg)_78%,transparent)] backdrop-blur-sm">
-            <div className="text-center">
-              <Spinner className="size-6 text-[var(--accent)] mx-auto" />
-              <div className="text-[13.5px] font-medium mt-3">正在为你出题…</div>
-              <div className="text-[12px] text-[var(--text-muted)] mt-1.5 max-w-[300px] leading-relaxed">
-                在翻你这一章问过的问题、写下的理解，和你说过还没搞懂的地方。
-              </div>
-            </div>
+              )
+            })}
           </div>
         )}
       </div>

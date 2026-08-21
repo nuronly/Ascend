@@ -45,6 +45,11 @@ export interface ChapterTarget {
   cards: number
   due: number
   last_quiz_at: string | null
+  /**
+   * 这一章还有没刷完的题。
+   * 出一套题要几十秒，人随时会被打断 —— 走开之后不该让那套题白丢。
+   */
+  pending: { id: string; answered: number; total: number } | null
 }
 
 /**

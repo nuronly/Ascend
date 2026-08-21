@@ -269,6 +269,22 @@ async def chapter_targets(scope: UserScope) -> list[dict]:
         ).all()
     )
 
+    # ★ 没刷完的题要能找回来。
+    #   一套题是有模型成本的（出一套要几十秒），而人随时会被打断 ——
+    #   出题时不该把他锁在那个界面上等，离开之后更不该让那套题白白丢掉。
+    #   落库的意义正在这里，但先前只落了库、没有回来的入口。
+    pending: dict[str, dict] = {}
+    for q in await scope.all(
+        select(Quiz)
+        .where(Quiz.user_id == scope.user_id, Quiz.finished_at.is_(None))
+        .order_by(Quiz.created_at.desc())
+        .limit(60)
+    ):
+        if q.chapter_id in pending or not q.items:
+            continue
+        done = sum(1 for i in q.items if i.get("correct") is not None)
+        pending[q.chapter_id] = {"id": q.id, "answered": done, "total": len(q.items)}
+
     out: dict[str, dict] = {}
     for course, chapter, section in rows:
         it = out.setdefault(
@@ -286,6 +302,7 @@ async def chapter_targets(scope: UserScope) -> list[dict]:
                 "last_quiz_at": (
                     last_quiz[chapter.id].isoformat() if last_quiz.get(chapter.id) else None
                 ),
+                "pending": pending.get(chapter.id),
             },
         )
         it["sections"] += 1
@@ -367,7 +384,25 @@ def _clean(items: Any, n_choice: int, n_short: int) -> list[dict]:
 
 
 async def generate(scope: UserScope, chapter: Chapter, *, quota: int | None = None) -> Quiz:
-    """给一章出一套题并落库。"""
+    """给一章出一套题并落库。
+
+    ★ 出题前先把这一章**一道都没答过**的旧题清掉。
+
+      用户离开又回来重新出题时，会留下一串谁也不会去刷的空套题 ——
+      堆在「没刷完」的入口里只会让人困惑（「我什么时候刷过这么多次？」）。
+      而答过一部分的那些**必须留着**：那是他的进度，也是他的错题记录。
+    """
+    stale = await scope.all(
+        select(Quiz).where(
+            Quiz.user_id == scope.user_id,
+            Quiz.chapter_id == chapter.id,
+            Quiz.finished_at.is_(None),
+        )
+    )
+    for old in stale:
+        if not any(i.get("correct") is not None for i in (old.items or [])):
+            await scope.session.delete(old)
+
     sections, cards = await _material(scope, chapter)
     if not sections:
         raise ValueError("这一章还没有内容可考")

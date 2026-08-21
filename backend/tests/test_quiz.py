@@ -382,6 +382,67 @@ class Test出题_prompt:
             assert must in prompts.QUIZ_SYSTEM, must
 
 
+# ── 7. 没刷完的题要能找回来 ───────────────────────────────────
+class Test未完成的题:
+    """出一套题要几十秒，而人随时会被打断。
+
+    所以出题时不该把他锁在界面上等，走开之后更不该让那套题白丢 ——
+    落库的意义正在这里。这一节守的是「找回来」这条链路：
+    没答过的旧题要清掉（否则堆一串谁也不会刷的空套题），
+    答过一部分的必须留着（那是他的进度和错题记录）。
+    """
+
+    def _pending(self, quizzes: list) -> dict:
+        """复现 chapter_targets 里挑 pending 的那段逻辑。"""
+        pending: dict[str, dict] = {}
+        for q in quizzes:  # 调用方按 created_at 倒序
+            if q["chapter_id"] in pending or not q["items"]:
+                continue
+            done = sum(1 for i in q["items"] if i.get("correct") is not None)
+            pending[q["chapter_id"]] = {"id": q["id"], "answered": done, "total": len(q["items"])}
+        return pending
+
+    def test_取每章最近的那一套(self):
+        got = self._pending(
+            [
+                {"id": "new", "chapter_id": "ch1", "items": [{"correct": True}]},
+                {"id": "old", "chapter_id": "ch1", "items": [{"correct": True}]},
+            ]
+        )
+        assert got["ch1"]["id"] == "new"
+
+    def test_一道题都没有的套不算(self):
+        """出题失败留下的空壳不该显示成「还没刷完」。"""
+        got = self._pending([{"id": "empty", "chapter_id": "ch1", "items": []}])
+        assert got == {}
+
+    def test_进度按已答题数算(self):
+        got = self._pending(
+            [
+                {
+                    "id": "q",
+                    "chapter_id": "ch1",
+                    "items": [{"correct": True}, {"correct": False}, {}, {"correct": None}],
+                }
+            ]
+        )
+        assert got["ch1"] == {"id": "q", "answered": 2, "total": 4}
+
+    def test_一道没答的旧题该被清掉_答过的要留(self):
+        """★ 判据是「有没有答过任何一道」：
+        没答过的是纯浪费（用户重新出题时留下的空壳）；
+        答过一部分的是他的进度，删掉等于把错题记录一起删了。"""
+        def should_drop(items: list) -> bool:
+            return not any(i.get("correct") is not None for i in (items or []))
+
+        assert should_drop([{"q": "a"}, {"q": "b"}]) is True
+        assert should_drop([]) is True
+        assert should_drop([{"q": "a", "correct": False}]) is False
+        assert should_drop([{"q": "a", "correct": True}]) is False
+        # correct=None 不算答过（初始化的形状）
+        assert should_drop([{"q": "a", "correct": None}]) is True
+
+
 def _独立运行() -> int:
     import inspect
     import traceback
@@ -394,6 +455,7 @@ def _独立运行() -> int:
         TestFSRS评级,
         Test题量,
         Test出题_prompt,
+        Test未完成的题,
     ):
         print(f"\n{cls.__name__}")
         inst = cls()
